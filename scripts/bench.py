@@ -28,12 +28,16 @@ FIELD_2025 = ["SakkirinaSolo", "Sakkirina", "HQL_Plus_BOT", "BestMCTS3", "EBot_C
 P1_RE = re.compile(r"P1 wins: (\d+)/(\d+)")
 P2_RE = re.compile(r"P2 wins: (\d+)/(\d+)")
 DRAW_RE = re.compile(r"draws: (\d+)/(\d+)")
+# "other factors" == TURN_TIMEOUT / BOT_EXCEPTION / INCORRECT_MOVE. Any nonzero
+# count invalidates a batch, so it is aggregated and reported alongside the
+# win rate rather than being silently discarded with the rest of stdout.
+OTHER_RE = re.compile(r"Ends due to other factors: (\d+)/(\d+)")
 
 
-def run_games(bot1: str, bot2: str, n: int, seed: int, turn_timeout: int) -> tuple[int, int, int]:
+def run_games(bot1: str, bot2: str, n: int, seed: int, turn_timeout: int) -> tuple[int, int, int, int]:
     """Run n games of bot1 (P1) vs bot2 (P2) on seeds seed..seed+n-1.
 
-    Returns (p1_wins, p2_wins, draws)."""
+    Returns (p1_wins, p2_wins, draws, other_factor_ends)."""
     cmd = [
         "dotnet", str(RUNNER), bot1, bot2,
         "-n", str(n), "-s", str(seed), "-to", str(turn_timeout),
@@ -46,9 +50,12 @@ def run_games(bot1: str, bot2: str, n: int, seed: int, turn_timeout: int) -> tup
     p1 = P1_RE.search(out)
     p2 = P2_RE.search(out)
     dr = DRAW_RE.search(out)
+    ot = OTHER_RE.search(out)
     if not (p1 and p2):
         sys.exit(f"Could not parse GameRunner output for {bot1} vs {bot2}:\n{out[-2000:]}")
-    return int(p1.group(1)), int(p2.group(1)), int(dr.group(1)) if dr else 0
+    return (int(p1.group(1)), int(p2.group(1)),
+            int(dr.group(1)) if dr else 0,
+            int(ot.group(1)) if ot else 0)
 
 
 def wilson_ci(wins: float, n: int, z: float = 1.96) -> tuple[float, float]:
@@ -73,12 +80,13 @@ def mirror_match(a: str, b: str, pairs: int, seed: int, timeout: int, workers: i
         jobs.append((b, a, n, s, False))
         s += n
         left -= n
-    a_wins = b_wins = draws = 0
+    a_wins = b_wins = draws = other = 0
     a_seat1_wins = a_seat2_wins = 0
     with ThreadPoolExecutor(max_workers=workers) as ex:
         results = list(ex.map(lambda j: (j, run_games(j[0], j[1], j[2], j[3], timeout)), jobs))
-    for (bot1, bot2, n, s0, a_is_p1), (p1w, p2w, dr) in results:
+    for (bot1, bot2, n, s0, a_is_p1), (p1w, p2w, dr, ot) in results:
         draws += dr
+        other += ot
         if a_is_p1:
             a_wins += p1w
             b_wins += p2w
@@ -92,6 +100,8 @@ def mirror_match(a: str, b: str, pairs: int, seed: int, timeout: int, workers: i
     print(f"\n=== {a} vs {b} — {total} games ({pairs} mirror pairs, seeds {seed}..{seed + pairs - 1}) ===")
     print(f"{a}: {a_wins} wins ({100 * a_wins / total:.1f}%)  [95% CI {100 * lo:.1f}–{100 * hi:.1f}%]")
     print(f"  as P1: {a_seat1_wins}/{pairs}  as P2: {a_seat2_wins}/{pairs}  draws: {draws}")
+    flag = "" if other == 0 else "   <<< BATCH INVALID"
+    print(f"  ends due to other factors (TURN_TIMEOUT/BOT_EXCEPTION/INCORRECT_MOVE): {other}{flag}")
     return a_wins, b_wins, draws
 
 
