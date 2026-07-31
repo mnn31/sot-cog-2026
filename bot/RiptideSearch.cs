@@ -99,6 +99,19 @@ public sealed class Search
     public int Iterations { get; private set; }
     public int NodesCreated => _nodesCreated;
 
+    /// <summary>
+    /// True when every determinization's turn plan space was solved exactly, so
+    /// the search returned because there was nothing left to find rather than
+    /// because it ran out of time. This is the signal the adaptive time slice is
+    /// built on: converged decisions hand their unused budget back to the turn,
+    /// unconverged ones are the reason a slice is worth widening on slow
+    /// hardware.
+    /// </summary>
+    public bool Converged { get; private set; }
+
+    /// <summary>Determinizations whose plan space was solved (diagnostics).</summary>
+    public int WorldsSolved { get; private set; }
+
     public Search(PlayerEnum me, Stopwatch turnClock)
     {
         _me = me;
@@ -115,10 +128,12 @@ public sealed class Search
         _nodesCreated = 0;
         _abort = false;
         Iterations = 0;
+        Converged = false;
+        WorldsSolved = 0;
 
         List<Move> roots = TrimRoot(rootMoves, PolicyContext.From(gameState));
         int n = roots.Count;
-        if (n == 1) return roots[0];
+        if (n == 1) { Converged = true; return roots[0]; }
 
         int k = seeds.Length;
         var trees = new PlanNode?[k];
@@ -152,6 +167,18 @@ public sealed class Search
                 progress = true;
             }
         }
+
+        // Converged == every world we managed to build was solved exactly. A
+        // world we never got round to building (the deadline expired during
+        // determinization) counts as not converged.
+        int built = 0;
+        for (int i = 0; i < k; i++)
+        {
+            if (trees[i] == null) continue;
+            built++;
+            if (trees[i]!.Leaf) WorldsSolved++;
+        }
+        Converged = built == k && WorldsSolved == k;
 
         for (int i = 0; i < k; i++)
         {

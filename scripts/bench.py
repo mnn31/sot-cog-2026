@@ -42,11 +42,17 @@ def run_games(bot1: str, bot2: str, n: int, seed: int, turn_timeout: int) -> tup
         "dotnet", str(RUNNER), bot1, bot2,
         "-n", str(n), "-s", str(seed), "-to", str(turn_timeout),
     ]
-    out = subprocess.run(
+    proc = subprocess.run(
         cmd, capture_output=True, text=True,
         env={**os.environ, "DOTNET_ROLL_FORWARD": "LatestMajor"},
         cwd=RUNNER.parent,
-    ).stdout
+    )
+    out = proc.stdout
+    # Riptide self-reports TURN_TIMEOUT / BOT_EXCEPTION / INCORRECT_MOVE losses
+    # on stderr; GameRunner's own totals never say which bot was at fault.
+    for line in proc.stderr.splitlines():
+        if "FATAL" in line:
+            print(f"  !! {bot1} vs {bot2} seed {seed}: {line.strip()}", flush=True)
     p1 = P1_RE.search(out)
     p2 = P2_RE.search(out)
     dr = DRAW_RE.search(out)
