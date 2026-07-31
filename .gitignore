@@ -14,5 +14,11 @@ results/
 logs/
 *.log
 
+# Per-iteration SPSA candidates (weights/baseline.json and weights/tuned-*.json
+# are kept; the transient perturbations are not)
+weights/iter*.json
+weights/_smoke*.json
+
 # OS
 .DS_Store
+snapshots/

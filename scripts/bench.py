@@ -18,7 +18,11 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-RUNNER = ROOT / "ScriptsOfTribute-Core/GameRunner/bin/Release/net8.0/GameRunner.dll"
+# RIPTIDE_RUNNER lets benchmarks run from a frozen snapshot of the runner+bot
+# DLLs so dev rebuilds don't contaminate in-flight measurements.
+RUNNER = Path(os.environ.get(
+    "RIPTIDE_RUNNER",
+    ROOT / "ScriptsOfTribute-Core/GameRunner/bin/Release/net8.0/GameRunner.dll"))
 FIELD_2025 = ["SakkirinaSolo", "Sakkirina", "HQL_Plus_BOT", "BestMCTS3", "EBot_C", "EBot_F"]
 
 P1_RE = re.compile(r"P1 wins: (\d+)/(\d+)")
