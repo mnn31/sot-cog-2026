@@ -1,0 +1,18 @@
+# Upstream reference clones (not ours, re-clone via scripts/setup.sh)
+ScriptsOfTribute-Core/
+ScriptsOfTribute-CompetitionsArchive/
+ScriptsOfTribute-Python/
+ScriptsOfTribute-GUI-2.0/
+
+# .NET build output
+bin/
+obj/
+*.user
+
+# Benchmark output
+results/
+logs/
+*.log
+
+# OS
+.DS_Store
