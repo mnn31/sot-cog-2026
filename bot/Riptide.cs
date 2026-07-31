@@ -74,6 +74,11 @@ public class Riptide : AI
 
     public Riptide()
     {
+        // Load the external weight table (RIPTIDE_WEIGHTS) exactly once per
+        // process, before any search runs, and force Eval/CardValues to
+        // initialise so a malformed file fails loudly here rather than silently
+        // reverting to defaults halfway through a tournament.
+        Weights.EnsureLoaded();
         Reset();
     }
 

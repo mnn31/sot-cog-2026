@@ -184,6 +184,41 @@ public static class CardValues
         ComboFactor[(int)PatronId.RED_EAGLE] = 1.10;
         ComboFactor[(int)PatronId.TREASURY] = 0.00; // Treasury cards have no combo effects
         ComboFactor[(int)PatronId.SAINT_ALESSIA] = 0.95;
+
+        ApplyOverrides();
+    }
+
+    /// <summary>
+    /// Overlay RIPTIDE_WEIGHTS overrides on top of the compiled-in tables.
+    /// Runs once, inside the static constructor, after every default is set.
+    /// Keys are accepted by CardId name ("card.RALLY.deck") and by raw index
+    /// ("card.68.deck"); the index form is applied second so it wins.
+    /// </summary>
+    private static void ApplyOverrides()
+    {
+        if (Weights.Count == 0) return;
+
+        foreach (CardId id in Enum.GetValues(typeof(CardId)))
+        {
+            int i = (int)id;
+            if ((uint)i >= CardCount) continue;
+            string n = id.ToString();
+            Deck[i] = Weights.G("card." + n + ".deck", Deck[i]);
+            InHand[i] = Weights.G("card." + n + ".hand", InHand[i]);
+        }
+        for (int i = 0; i < CardCount; i++)
+        {
+            Deck[i] = Weights.G("card." + i + ".deck", Deck[i]);
+            InHand[i] = Weights.G("card." + i + ".hand", InHand[i]);
+        }
+        foreach (PatronId p in Enum.GetValues(typeof(PatronId)))
+        {
+            int i = (int)p;
+            if ((uint)i >= 16) continue;
+            ComboFactor[i] = Weights.G("combo." + p, ComboFactor[i]);
+        }
+        for (int i = 0; i < 16; i++)
+            ComboFactor[i] = Weights.G("combo." + i, ComboFactor[i]);
     }
 
     private static void S(CardId id, double deck, double inHand)

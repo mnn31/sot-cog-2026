@@ -19,46 +19,73 @@ namespace Riptide;
 public static class Eval
 {
     // ---- tuning knobs -------------------------------------------------------
-    public const double Scale = 780.0;          // sigmoid e-fold, in raw points
+    // These are `static readonly` rather than `const` so that every one of them
+    // can be overridden from the RIPTIDE_WEIGHTS file (see Weights). The JIT
+    // still folds a static readonly double after class init, so the hot path is
+    // unchanged. The literal in each G(...) call is the compiled-in default and
+    // is what ships when no weight file is set.
+    public static readonly double Scale = Weights.G("eval.Scale", 780.0);          // sigmoid e-fold, in raw points
 
-    public const double PrestigeBase = 6.0;     // per-point weight at 0 progress
-    public const double PrestigeSlope = 34.0;   // extra per-point weight at full progress
-    public const double TempoOffset = 1.0;      // "+1 prestige is roughly break-even"
+    public static readonly double PrestigeBase = Weights.G("eval.PrestigeBase", 6.0);     // per-point weight at 0 progress
+    public static readonly double PrestigeSlope = Weights.G("eval.PrestigeSlope", 34.0);  // extra per-point weight at full progress
+    public static readonly double TempoOffset = Weights.G("eval.TempoOffset", 1.0);       // "+1 prestige is roughly break-even"
 
-    public const double Lead40Bonus = 900.0;    // we are >=40 and ahead
-    public const double Behind40Penalty = 1400.0;
-    public const double ApproachStep = 22.0;    // per point of opponent closeness to 40
-    public const double OwnApproachStep = 14.0;
-    public const double Danger80Step = 120.0;   // opponent in the 76-79 window
-    public const double Own80Step = 70.0;
+    public static readonly double Lead40Bonus = Weights.G("eval.Lead40Bonus", 900.0);     // we are >=40 and ahead
+    public static readonly double Behind40Penalty = Weights.G("eval.Behind40Penalty", 1400.0);
+    public static readonly double ApproachStep = Weights.G("eval.ApproachStep", 22.0);    // per point of opponent closeness to 40
+    public static readonly double OwnApproachStep = Weights.G("eval.OwnApproachStep", 14.0);
+    public static readonly double Danger80Step = Weights.G("eval.Danger80Step", 120.0);   // opponent in the 76-79 window
+    public static readonly double Own80Step = Weights.G("eval.Own80Step", 70.0);
 
-    public const double PatronDiff = 55.0;
-    public static readonly double[] EnemyPatronDist = { 0.0, 2000.0, 260.0, 40.0, 0.0 };
-    public static readonly double[] OwnPatronDist = { 0.0, 900.0, 160.0, 30.0, 0.0 };
-    public const double CrowsHoldPenalty = 90.0;   // decays with game progress
-    public const double AnseiFavourBonus = 25.0;
+    public static readonly double PatronDiff = Weights.G("eval.PatronDiff", 55.0);
+    public static readonly double[] EnemyPatronDist =
+    {
+        0.0,
+        Weights.G("eval.EnemyPatronDist1", 2000.0),
+        Weights.G("eval.EnemyPatronDist2", 260.0),
+        Weights.G("eval.EnemyPatronDist3", 40.0),
+        0.0,
+    };
+    public static readonly double[] OwnPatronDist =
+    {
+        0.0,
+        Weights.G("eval.OwnPatronDist1", 900.0),
+        Weights.G("eval.OwnPatronDist2", 160.0),
+        Weights.G("eval.OwnPatronDist3", 30.0),
+        0.0,
+    };
+    public static readonly double CrowsHoldPenalty = Weights.G("eval.CrowsHoldPenalty", 90.0);   // decays with game progress
+    public static readonly double AnseiFavourBonus = Weights.G("eval.AnseiFavourBonus", 25.0);
 
     // Trades deck quality against prestige. At 1.0 an 88-value card is worth
     // ~14 early prestige points, which is aggressively prestige-greedy; the 2025
     // champion sits at the opposite extreme (~50). Top tuning target.
-    public const double DeckWeight = 1.8;
-    public const double DeckNorm = 16.0;         // deck size at which no dilution penalty applies
-    public const double ComboWeight = 260.0;
-    public const double BewildermentExtra = 22.0; // on top of the negative card value
+    public static readonly double DeckWeight = Weights.G("eval.DeckWeight", 1.8);
+    public static readonly double DeckNorm = Weights.G("eval.DeckNorm", 16.0);         // deck size at which no dilution penalty applies
+    public static readonly double ComboWeight = Weights.G("eval.ComboWeight", 260.0);
+    public static readonly double BewildermentExtra = Weights.G("eval.BewildermentExtra", 22.0); // on top of the negative card value
 
-    public const double MyAgentCard = 0.90;
-    public const double MyAgentHp = 7.0;
-    public const double MyAgentTaunt = 12.0;
-    public const double EnemyAgentCard = 1.05;
-    public const double EnemyAgentHp = 8.0;
-    public const double EnemyAgentFlat = 15.0;
+    public static readonly double MyAgentCard = Weights.G("eval.MyAgentCard", 0.90);
+    public static readonly double MyAgentHp = Weights.G("eval.MyAgentHp", 7.0);
+    public static readonly double MyAgentTaunt = Weights.G("eval.MyAgentTaunt", 12.0);
+    public static readonly double EnemyAgentCard = Weights.G("eval.EnemyAgentCard", 1.05);
+    public static readonly double EnemyAgentHp = Weights.G("eval.EnemyAgentHp", 8.0);
+    public static readonly double EnemyAgentFlat = Weights.G("eval.EnemyAgentFlat", 15.0);
 
-    public const double TavernDeny = 0.40;
-    public const double TavernDenyAffinity = 1.10;
+    public static readonly double TavernDeny = Weights.G("eval.TavernDeny", 0.40);
+    public static readonly double TavernDenyAffinity = Weights.G("eval.TavernDenyAffinity", 1.10);
 
-    public const double CoinValue = 4.0;
-    public const double PatronCallValue = 22.0;
-    public const double UpcomingDrawValue = 0.35;
+    public static readonly double CoinValue = Weights.G("eval.CoinValue", 4.0);
+    public static readonly double PatronCallValue = Weights.G("eval.PatronCallValue", 22.0);
+    public static readonly double UpcomingDrawValue = Weights.G("eval.UpcomingDrawValue", 0.35);
+
+    // Combo-density mixture over P(X>=2), P(X>=3), P(X>=4).
+    public static readonly double ComboGe2 = Weights.G("eval.ComboGe2", 0.55);
+    public static readonly double ComboGe3 = Weights.G("eval.ComboGe3", 0.30);
+    public static readonly double ComboGe4 = Weights.G("eval.ComboGe4", 0.15);
+
+    // Discount on the opponent's banked coins when it is not our turn.
+    public static readonly double EnemyCoinValue = Weights.G("eval.EnemyCoinValue", 0.5);
 
     // Scratch buffers. GameRunner runs one bot instance per worker thread, so
     // these must not be shared across threads.
@@ -208,7 +235,7 @@ public static class Eval
         }
         else
         {
-            raw -= theirs.Coins * CoinValue * 0.5;
+            raw -= theirs.Coins * CoinValue * EnemyCoinValue;
         }
 
         for (int i = 0; i < mine.KnownUpcomingDraws.Count && i < 4; i++)
@@ -267,7 +294,7 @@ public static class Eval
             if (ge3 < 0) ge3 = 0;
             if (ge4 < 0) ge4 = 0;
 
-            value += ComboWeight * factor * (0.55 * ge2 + 0.30 * ge3 + 0.15 * ge4);
+            value += ComboWeight * factor * (ComboGe2 * ge2 + ComboGe3 * ge3 + ComboGe4 * ge4);
         }
 
         return value;
