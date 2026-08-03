@@ -87,9 +87,17 @@ public static class Weights
         }
         else
         {
+            // Live field values, not file contents — this line is the proof the
+            // overrides actually reached the evaluation AND the search. agg/lam/
+            // strat are printed because the v2.1 A/B is driven entirely by them
+            // and a silently-ignored key would make two arms identical.
             Console.Error.WriteLine("[riptide] weights '" + SourcePath + "' overrides=" + Count
                 + " DeckWeight=" + Eval.DeckWeight.ToString("G6", CultureInfo.InvariantCulture)
-                + " Scale=" + Eval.Scale.ToString("G6", CultureInfo.InvariantCulture));
+                + " Scale=" + Eval.Scale.ToString("G6", CultureInfo.InvariantCulture)
+                + " agg=" + Search.Aggregation
+                + " lam=" + Search.DisagreementLambda.ToString("G6", CultureInfo.InvariantCulture)
+                + " breadth=" + Search.BreadthBonus.ToString("G6", CultureInfo.InvariantCulture)
+                + " strat=" + Search.Stratify + "x" + Search.StratifyOversample);
         }
     }
 

@@ -72,7 +72,9 @@ internal sealed class PlanNode
 /// move, so root-move comparisons are paired). Within each determinization a
 /// PUCT-guided best-first search with max backup explores the current turn's
 /// move sequences, evaluating states after END_TURN or at the search horizon.
-/// Root values are averaged across determinizations.
+/// Root values are collapsed across determinizations by one of three selectable
+/// rules (<c>search.Aggregation</c>): mean, majority vote of the per-world best
+/// moves, or mean penalised by cross-world disagreement.
 /// </summary>
 public sealed class Search
 {
@@ -89,6 +91,72 @@ public sealed class Search
     public const int MaxNodesPerDecision = 16000;   // ~25 MB transient, freed per decision
     public const int MaxRootBranch = 22;
     public const int MaxChoiceBranch = 14;
+
+    // ---- root aggregation (v2.1) --------------------------------------------
+    // How the K per-world root values are collapsed into one ranking. Mean is
+    // v1/v2 behaviour and is what ships; the other two exist because averaging
+    // per-world OPTIMA is strategy fusion — it prices in an ability to adapt to
+    // whichever world turns out to be real, which we do not have (v1 §3.1).
+    //
+    // Selected through the weight file so A/B costs no rebuild:
+    //   search.Aggregation = 0  mean over worlds                       [default]
+    //                        1  majority vote of per-world best moves, mean as
+    //                           the tiebreak
+    //                        2  mean - lambda * cross-world std dev
+    public const int AggMean = 0;
+    public const int AggVote = 1;
+    public const int AggPenalty = 2;
+
+    public static readonly int Aggregation = (int)Weights.G("search.Aggregation", AggMean);
+
+    /// <summary>Std-dev penalty strength for <see cref="AggPenalty"/>. Values are in
+    /// (0,1) eval units, where a whole turn is typically worth ~0.02-0.10, so a
+    /// useful lambda is O(0.1-1).</summary>
+    public static readonly double DisagreementLambda = Weights.G("search.DisagreementLambda", 1.0);
+
+    /// <summary>Per-world bonus for a root move every determinization bothered to
+    /// look at. v1 hard-coded 0.0005; it is a weight now so it can be zeroed when
+    /// A/B-ing the aggregation modes (it is itself a crude agreement term).</summary>
+    public static readonly double BreadthBonus = Weights.G("search.BreadthBonus", 0.0005);
+
+    // ---- determinization sampling (v2.1) ------------------------------------
+    // 0 = K iid seeds (v1/v2 behaviour, default). 1 = stratified: oversample
+    // candidate worlds, rank them by the one latent variable the within-turn
+    // search is actually sensitive to (our own draw order), and take one world
+    // uniformly at random from each of K equal-count strata. Same estimator,
+    // strictly lower ensemble variance. See docs/riptide-v2.md §4.2.
+    public static readonly int Stratify = (int)Weights.G("search.Stratify", 0);
+    public static readonly int StratifyOversample = (int)Weights.G("search.StratifyOversample", 4);
+    /// <summary>How many upcoming cards of our own deck the stratification
+    /// statistic looks at.</summary>
+    public static readonly int StratifyDepth = (int)Weights.G("search.StratifyDepth", 5);
+    /// <summary>Hard wall-clock cap on candidate generation, per turn.</summary>
+    public static readonly double StratifyBudgetSeconds =
+        Weights.G("search.StratifyBudgetSeconds", 0.15);
+
+    /// <summary>
+    /// The scalar a determinized world is stratified on: the value of the next
+    /// <see cref="StratifyDepth"/> cards we would draw in that world, continuing
+    /// into the (also scrambled) cooldown pile when the draw pile is short.
+    ///
+    /// This is the *only* hidden quantity the within-turn search is materially
+    /// sensitive to. It is deliberately not a function of the opponent's hand:
+    /// the leaf evaluation pools their Hand/DrawPile/CooldownPile into one deck
+    /// score and the search never crosses END_TURN, so their hand/draw split is
+    /// provably invisible to us (docs/riptide-v2.md §4.1).
+    /// </summary>
+    public static double WorldDrawStat(SeededGameState s)
+    {
+        var p = s.CurrentPlayer;
+        int need = StratifyDepth;
+        if (need < 1) need = 1;
+        double v = 0.0;
+        var draw = p.DrawPile;
+        for (int i = 0; i < draw.Count && need > 0; i++, need--) v += CardValues.HandValue(draw[i]);
+        var cd = p.CooldownPile;
+        for (int i = 0; i < cd.Count && need > 0; i++, need--) v += CardValues.HandValue(cd[i]);
+        return v;
+    }
 
     private readonly PlayerEnum _me;
     private readonly Stopwatch _clock;
@@ -112,6 +180,15 @@ public sealed class Search
     /// <summary>Determinizations whose plan space was solved (diagnostics).</summary>
     public int WorldsSolved { get; private set; }
 
+    /// <summary>
+    /// True when the selected aggregation rule picked a different root move than
+    /// plain mean aggregation would have. Diagnostics only, but it is the number
+    /// that makes a win-rate A/B interpretable: an aggregation mode that never
+    /// changes a move cannot change a result, and at n = 24 the win rate alone
+    /// cannot tell those two cases apart.
+    /// </summary>
+    public bool ChangedByAggregation { get; private set; }
+
     public Search(PlayerEnum me, Stopwatch turnClock)
     {
         _me = me;
@@ -130,6 +207,7 @@ public sealed class Search
         Iterations = 0;
         Converged = false;
         WorldsSolved = 0;
+        ChangedByAggregation = false;
 
         List<Move> roots = TrimRoot(rootMoves, PolicyContext.From(gameState));
         int n = roots.Count;
@@ -138,7 +216,9 @@ public sealed class Search
         int k = seeds.Length;
         var trees = new PlanNode?[k];
         var sum = new double[n];
+        var sumSq = new double[n];
         var count = new int[n];
+        var votes = new int[n];
 
         for (int i = 0; i < k; i++)
         {
@@ -180,30 +260,65 @@ public sealed class Search
         }
         Converged = built == k && WorldsSolved == k;
 
+        // Per-world statistics. Every world also casts one vote for its own best
+        // root move — that vote is what makes AggVote a *consensus* rule rather
+        // than an average of per-world optima.
         for (int i = 0; i < k; i++)
         {
             var t = trees[i];
             if (t == null) continue;
+            int voteFor = -1;
+            double voteVal = double.NegativeInfinity;
             for (int j = 0; j < n; j++)
             {
-                if (t.ChildVisits[j] > 0)
-                {
-                    sum[j] += t.ChildValue[j];
-                    count[j]++;
-                }
+                if (t.ChildVisits[j] <= 0) continue;
+                double v = t.ChildValue[j];
+                sum[j] += v;
+                sumSq[j] += v * v;
+                count[j]++;
+                if (v > voteVal) { voteVal = v; voteFor = j; }
             }
+            if (voteFor >= 0) votes[voteFor]++;
         }
 
         int best = -1;
         double bestVal = double.NegativeInfinity;
+        int bestVotes = -1;
+        int plainBest = -1;
+        double plainVal = double.NegativeInfinity;
+        int mode = Aggregation;
         for (int j = 0; j < n; j++)
         {
             if (count[j] == 0) continue;
-            double v = sum[j] / count[j];
+            double mean = sum[j] / count[j];
             // Prefer moves that every determinization agreed to look at.
-            v += 0.0005 * count[j];
-            if (v > bestVal) { bestVal = v; best = j; }
+            double v = mean + BreadthBonus * count[j];
+            if (v > plainVal) { plainVal = v; plainBest = j; }
+
+            if (mode == AggPenalty && count[j] > 1)
+            {
+                // Population std dev of this move's value across worlds. A move
+                // that is excellent in half the worlds and terrible in the other
+                // half is exactly what mean aggregation over-trusts: we cannot
+                // choose which world we are in, so pay for the disagreement.
+                double var2 = sumSq[j] / count[j] - mean * mean;
+                if (var2 > 0.0) v -= DisagreementLambda * Math.Sqrt(var2);
+            }
+
+            if (mode == AggVote)
+            {
+                // Votes are primary, the mean-based score only breaks ties.
+                if (votes[j] > bestVotes || (votes[j] == bestVotes && v > bestVal))
+                {
+                    bestVotes = votes[j];
+                    bestVal = v;
+                    best = j;
+                }
+            }
+            else if (v > bestVal) { bestVal = v; best = j; }
         }
+
+        ChangedByAggregation = best >= 0 && plainBest >= 0 && best != plainBest;
 
         if (best < 0) return Policy.Best(rootMoves, PolicyContext.From(gameState));
         return roots[best];

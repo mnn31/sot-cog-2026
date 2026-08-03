@@ -163,6 +163,10 @@ public class Riptide : AI
     private int _turnNodes;
     private int _turnUnconverged;
     private double _turnMaxOvershoot;
+    // v2.1: how often the selected aggregation rule overrode plain-mean
+    // aggregation, and what the stratified seed draw cost. Both diag-only.
+    private int _turnAggChanged;
+    private double _turnSeedSeconds;
 
     public Riptide()
     {
@@ -193,6 +197,8 @@ public class Riptide : AI
         _turnNodes = 0;
         _turnUnconverged = 0;
         _turnMaxOvershoot = 0.0;
+        _turnAggChanged = 0;
+        _turnSeedSeconds = 0.0;
         // Deliberately NOT reset: _iterationsPerSecond, _solveSeconds,
         // _decisionsPerTurn, _timeGuard. Those measure the machine we are running
         // on, which does not change between games in a run, and _timeGuard in
@@ -294,6 +300,8 @@ public class Riptide : AI
                 + " dpt=" + _decisionsPerTurn.ToString("F1")
                 + " guard=" + _timeGuard.ToString("F2")
                 + " over=" + _turnMaxOvershoot.ToString("F3")
+                + " aggchg=" + _turnAggChanged
+                + " seedms=" + ((int)(_turnSeedSeconds * 1000.0))
                 + " panic=" + _panicCount);
         }
         if (_turnDecisions > 0)
@@ -306,6 +314,8 @@ public class Riptide : AI
         _turnNodes = 0;
         _turnUnconverged = 0;
         _turnMaxOvershoot = 0.0;
+        _turnAggChanged = 0;
+        _turnSeedSeconds = 0.0;
     }
 
     private Move Decide(GameState gameState, List<Move> possibleMoves, TimeSpan remainingTime)
@@ -327,7 +337,9 @@ public class Riptide : AI
             if (_turnDecisions > 0) RollTurn();
             _turnUsedSeconds = 0.0;
             _turnBudgetSeconds = TurnBudget(remainingSeconds);
-            for (int i = 0; i < _seeds.Length; i++) _seeds[i] = NextRandom() | 1UL;
+            double seedT0 = _callClock.Elapsed.TotalSeconds;
+            DrawSeeds(gameState, _turnBudgetSeconds);
+            _turnSeedSeconds = _callClock.Elapsed.TotalSeconds - seedT0;
         }
         else if (_turnBudgetSeconds <= 0.0)
         {
@@ -360,6 +372,78 @@ public class Riptide : AI
 
         RecordDecision(started, deadline, search);
         return picked;
+    }
+
+    /// <summary>
+    /// Choose the turn's determinization seed set.
+    ///
+    /// Default (<c>search.Stratify = 0</c>): K iid seeds, v1/v2 behaviour. The
+    /// seeds are drawn once per turn and reused for every decision and every root
+    /// move, which is the common-random-numbers property root-move comparisons
+    /// rest on — stratifying does not change that, it only changes *which* K
+    /// worlds the turn is compared over.
+    ///
+    /// Stratified (<c>search.Stratify = 1</c>): draw
+    /// <c>K * StratifyOversample</c> candidate worlds, score each by
+    /// <see cref="Search.WorldDrawStat"/> (the value of the next few cards we
+    /// would draw — the one hidden quantity the within-turn search is actually
+    /// sensitive to), sort, split into K equal-count strata and take one world
+    /// uniformly at random from each. Proper stratified sampling: unbiased for
+    /// the same ensemble mean, with the between-strata component of the variance
+    /// removed. Nothing here conditions on anything the engine would not let us
+    /// observe — a candidate is a world the engine itself produced from a seed we
+    /// picked, and the ranking key is computed only from our OWN deck.
+    ///
+    /// Cost is bounded twice: by <c>search.StratifyBudgetSeconds</c> and by a
+    /// quarter of the turn budget, and the loop degrades to iid seeds rather than
+    /// overrunning. It runs once per turn, not once per decision.
+    /// </summary>
+    private void DrawSeeds(GameState gameState, double left)
+    {
+        int k = _seeds.Length;
+        int over = Search.StratifyOversample;
+        if (Search.Stratify == 0 || over < 2)
+        {
+            for (int i = 0; i < k; i++) _seeds[i] = NextRandom() | 1UL;
+            return;
+        }
+
+        int m = k * over;
+        var cand = new ulong[m];
+        var stat = new double[m];
+        double cap = Search.StratifyBudgetSeconds;
+        double quarter = 0.25 * (left > 0.0 ? left : 0.0);
+        if (cap > quarter) cap = quarter;
+        double cutoff = _callClock.Elapsed.TotalSeconds + cap;
+
+        int got = 0;
+        for (int i = 0; i < m; i++)
+        {
+            ulong s = NextRandom() | 1UL;
+            cand[i] = s;
+            try { stat[i] = Search.WorldDrawStat(gameState.ToSeededGameState(s)); }
+            catch (Exception) { stat[i] = 0.0; }
+            got++;
+            if (_callClock.Elapsed.TotalSeconds > cutoff) break;
+        }
+
+        // Too few candidates to stratify meaningfully (slow machine, tight turn):
+        // fall back to plain iid rather than pretending K strata exist.
+        if (got < 2 * k)
+        {
+            for (int i = 0; i < k; i++) _seeds[i] = i < got ? cand[i] : (NextRandom() | 1UL);
+            return;
+        }
+
+        Array.Sort(stat, cand, 0, got);
+        for (int i = 0; i < k; i++)
+        {
+            int lo = (int)((long)i * got / k);
+            int hi = (int)((long)(i + 1) * got / k);
+            if (hi <= lo) hi = lo + 1;
+            if (hi > got) hi = got;
+            _seeds[i] = cand[lo + (int)(NextRandom() % (ulong)(hi - lo))];
+        }
     }
 
     /// <summary>
@@ -456,6 +540,7 @@ public class Riptide : AI
         _turnIterations += search.Iterations;
         _turnNodes += search.NodesCreated;
         if (!search.Converged) _turnUnconverged++;
+        if (search.ChangedByAggregation) _turnAggChanged++;
 
         // Solve cost: converged decisions only. An unconverged decision tells us
         // nothing about how long a solve takes, only that our own deadline was

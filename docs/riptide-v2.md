@@ -43,8 +43,11 @@ candidate is therefore a file, and a tuning iteration costs zero rebuilds.
   from):
 
   ```
-  [riptide] weights '/abs/path.json' overrides=38 DeckWeight=1.8 Scale=780
+  [riptide] weights '/abs/path.json' overrides=38 DeckWeight=1.8 Scale=780 \
+            agg=0 lam=1 breadth=0.0005 strat=0x4
   ```
+
+  (the `agg`/`lam`/`breadth`/`strat` fields were added in v2.1 — see §4.6)
 
   It prints the *live field values*, not the file contents, so the line is proof
   the overrides actually reached the evaluation. A failed load prints
@@ -317,7 +320,7 @@ re-run at will without a rebuild contaminating anything.
 | Mean search iterations / turn | 192 k | 224 k | **215 k** |
 | Max overrun past our own deadline | — | 0.015 s | **0.010 s** |
 | Learned `guard` | — | 0.05 s floor | **0.05 s floor** |
-| Greedy fallbacks | 0 | 0 | **0** |
+| Greedy fallbacks | 0 | 0 | **0** (but see §4.5 — this row is a 2-game sample and the true rate is ~1 % of turns) |
 | `[riptide] FATAL` | n/a | 0 | **0** |
 
 The peak turn moved from 63% to 90% of the self-imposed ceiling and mean search
@@ -465,3 +468,369 @@ a third of the normal budget, zero Riptide timeouts, zero exceptions.
   `SolveFloorFraction` and `SweepsPerWorld` are reasoned from the measured
   distributions, not tuned. They are `const` and outside the `RIPTIDE_WEIGHTS`
   key space (§1.2), so `scripts/tune.py` will not touch them.
+
+---
+
+## 4. Hidden information — root aggregation and determinization sampling (v2.1)
+
+Targets v1 §3.1 (**strategy fusion**) and v1 §3.3 (**no belief update**), i.e. the
+top v2 priority, and `docs/analysis-sakkirina.md` §6.6 / §7.2 items 6 and 8.
+
+Both changes are **off by default**: with no weight file the bot is
+behaviourally identical to §1–§3 above. Everything here is selected through the
+existing `RIPTIDE_WEIGHTS` mechanism, so an A/B arm is a two-line JSON file and
+zero rebuilds — which is the point, because none of it can be decided at the
+sample sizes a laptop can produce (§4.6).
+
+### 4.1 What is actually hidden — and what of it the search can see
+
+Before adding a belief model it is worth establishing what there is to have a
+belief *about*. Three things are hidden from us at a decision point, and they are
+not equally important:
+
+| Hidden quantity | Observable? | Does it reach our leaf value? |
+|---|---|---|
+| **Opponent's hand / draw split** | composition yes, split no | **No — provably** |
+| **Our own draw + cooldown order** | composition yes, order no | **Yes** |
+| **Face-down tavern deck order** | composition yes, order no | Yes |
+
+The first row is the one the "belief model" idea is usually about, and it is a
+dead end for *this* architecture. The engine hands us
+`FairSerializedEnemyPlayer.HandAndDraw` — hand and draw pile concatenated and
+sorted by `CommonId` (`Engine/src/Serializers/GameState.cs`). So the opponent's
+**total deck composition is already fully observable**; there is nothing to infer
+about *what* they hold. The only unknown is *which* of those cards are in hand
+versus in deck, and `SeededGameState.ScrambleEnemyPlayerCards` re-splits exactly
+that. Three independent facts make that split invisible to us:
+
+1. **The evaluation pools it.** `Eval.DeckScore` accumulates
+   `Hand + DrawPile + CooldownPile + Played + Agents` into one sum and one
+   per-deck count (`bot/RiptideEval.cs`). Both are invariant to how the pool is
+   split. `KnownUpcomingDraws` is read for `mine` only.
+2. **The move-ordering policy never reads it.** `PolicyContext.From` takes
+   `Agents`, `Coins`, `Power`, `Prestige` from the opponent and nothing else
+   (`bot/RiptidePolicy.cs`).
+3. **The search never crosses `END_TURN`.** Leaves are evaluated on the state
+   *after* `END_TURN`, where the opponent has not acted.
+   `BoardManager.EndTurn` performs the taunt free-hits (agents — public), banks
+   *our* power into prestige and draws *our* new hand; the enemy hand is not
+   touched. `OPP_DISCARD` effects are queued into `StartOfNextTurnEffects` and
+   resolve at the top of the opponent's turn, i.e. past every leaf we evaluate.
+
+So a particle filter over the opponent's hand — however principled — would
+change **not one** number the search consumes. That is why it is not implemented
+(§4.4).
+
+What *does* move the leaf value is the second and third rows: which of our own
+cards a mid-turn `DRAW` effect delivers (this changes what is legal and playable
+*this turn*), and what a tavern slot refills with after a buy (this changes the
+tavern-denial term and the next buy). Row two is the dominant one, and it is what
+§4.3 attacks.
+
+### 4.2 Root aggregation modes (`search.Aggregation`)
+
+v1 aggregated the root by averaging each move's per-world **max-backup** value
+across the K worlds that visited it, then taking the argmax. That is textbook
+strategy fusion: each world is solved *exactly* (v1 §1.2), so the mean is a mean
+of K optima, which silently prices in an ability to adapt to whichever world
+turns out to be real. v1 §3.0 notes the solving makes this *worse* than it would
+be under a shallow search.
+
+Three selectable rules, in `bot/RiptideSearch.cs`:
+
+| `search.Aggregation` | Rule | Rationale |
+|---|---|---|
+| `0` (default) | `mean_k(v_k) + BreadthBonus * count` | v1/v2 behaviour, unchanged |
+| `1` | **majority vote** of each world's own argmax; the mode-0 score breaks ties | consensus rather than average; a move must be *best somewhere often*, not merely high on average |
+| `2` | `mean_k(v_k) - lambda * sd_k(v_k) + BreadthBonus * count` | keeps the mean but charges for cross-world disagreement — a move that is excellent in half the worlds and terrible in the other half is exactly what mode 0 over-trusts |
+
+Supporting keys:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `search.Aggregation` | `0` | mode selector above |
+| `search.DisagreementLambda` | `1.0` | mode 2 only. In leaf-eval units (the evaluation is a sigmoid into `(0,1)`), so `lambda = 1` charges one cross-world standard deviation against the mean. The scale of a root move's cross-world sd has **not** been measured directly — the default was chosen as the natural "one sd" point and the pod plan sweeps `0.3 / 1.0 / 3.0` around it (§4.6) |
+| `search.BreadthBonus` | `0.0005` | v1's hard-coded per-world agreement bonus, now a knob so it can be zeroed when A/B-ing the modes (it is itself a crude agreement term and would otherwise confound them) |
+
+The per-world vote is free: the existing pass over `trees[i].ChildValue[]`
+already touches every (world, root move) pair, so mode 1 costs one extra
+comparison per pair and mode 2 one extra multiply-add (`sumSq`).
+
+**Instrumentation.** `Search.ChangedByAggregation` records whether the selected
+rule picked a different root move than plain mean would have; `RIPTIDE_DIAG=1`
+sums it per turn as `aggchg=`. This is the number that makes a small-n A/B
+readable at all — a mode that never overrides mean cannot change a result, and a
+24-game win rate cannot distinguish "no effect" from "effect, but unlucky".
+Measured vs `BestMCTS3` at `-to 10`, one game each:
+
+| Mode | Root decisions searched | Overrode mean | Rate |
+|---|---|---|---|
+| `1` (vote) | 55 | 3 | 5.5 % |
+| `2` (lambda = 1.0) | 54 | 3 | 5.6 % |
+
+So both modes are live but *sparse*: they change roughly one root move in
+eighteen. That is a real effect on the hard decisions and a strong argument that
+n = 24 cannot possibly resolve it.
+
+### 4.3 Stratified determinization (`search.Stratify`)
+
+The cheap variance win, and the honest version of "belief-aware determinization".
+
+`GameState._board` is private and `ToSeededGameState(seed)` is the only
+constructor we are given, so we **cannot** hand-build a conditioned world. What
+we *can* do is choose *which* seeds enter the ensemble, and there the useful
+question is not "is this world consistent with what I observed" (§4.1: every
+world already is, and the part that differs is invisible) but "are my K worlds a
+low-variance sample of the thing that actually matters".
+
+With `search.Stratify = 1`:
+
+1. Draw `K * StratifyOversample` candidate seeds and build each world
+   (`ToSeededGameState` only — no `ApplyMove`, so this is cheap).
+2. Score each with `Search.WorldDrawStat`: the `CardValues.HandValue` sum of the
+   next `StratifyDepth` cards **of our own deck** in that world, continuing into
+   the (also scrambled) cooldown pile when the draw pile runs short. This is the
+   latent variable §4.1 identified as dominant.
+3. Sort, cut into K equal-count strata, and take **one world uniformly at random
+   from each stratum**.
+
+That is textbook stratified sampling: the ensemble mean stays unbiased, and the
+between-strata component of its variance is removed. It is not a belief update —
+it does not condition on anything — it is a variance reduction on the estimator
+we already had. Nothing here looks at information the engine withholds: the
+candidates are worlds the engine itself produced, and the ranking key is computed
+from our own deck only.
+
+Common random numbers are preserved exactly as before: the K seeds are chosen
+**once per turn** and reused for every decision and every root move, so root-move
+comparisons stay paired. Stratification changes which K worlds the turn is
+compared over, not the pairing.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `search.Stratify` | `0` (off) | 1 = stratified seed selection |
+| `search.StratifyOversample` | `4` | candidates per world (K=14 → 56 candidates) |
+| `search.StratifyDepth` | `5` | how many upcoming cards the ranking statistic covers |
+| `search.StratifyBudgetSeconds` | `0.15` | hard wall-clock cap on candidate generation |
+
+**Cost and safety.** Measured on the Mac: `seedms` (new in the `RIPTIDE_DIAG`
+line) is **0–2 ms per turn** for 56 candidates, against a 9.3 s turn ceiling —
+i.e. under 0.03 % of the budget. It runs inside `_callClock`, so it is already
+counted against the turn budget by construction, and it is bounded twice
+(`StratifyBudgetSeconds` and 25 % of the turn budget) with a degradation path: if
+fewer than `2K` candidates were generated before the cutoff, the code falls back
+to plain iid seeds rather than pretending K strata exist.
+
+### 4.4 What was skipped, and why
+
+* **A belief model / particle filter over the opponent's hand — skipped, and it
+  should stay skipped until the search crosses `END_TURN`.** Not because it is
+  intractable, but because §4.1 shows it is a **provable no-op** for this
+  architecture: the opponent's deck composition is already fully observable, the
+  only hidden part is the hand/draw split, and that split reaches neither the
+  evaluation (pools hand+draw+cooldown), nor the policy (never reads it), nor the
+  search (stops before the opponent acts). Implementing it would have produced
+  code that measurably does nothing. **This flips the moment an opponent-turn
+  lookahead is added** (v1 §3.2) — at that point the split becomes first-order
+  and this section should be revisited, not before.
+* **Rejection-sampling worlds against observed opponent behaviour** (e.g. "they
+  ended their turn without attacking our taunt agent, so they held no Power
+  source") — skipped for the same reason plus a second one: the inference is
+  about which cards they *held*, and the composition of what they hold is
+  already given to us exactly. The only conditioning left would be on the
+  *split*, which §4.1 rules out.
+* **Antithetic variates** — skipped. The seed feeds a 48-bit LCG driving an
+  `OrderBy(_ => rng.Next())` shuffle; there is no seed transformation that
+  produces the negatively-correlated *permutation* an antithetic pair needs.
+  Stratification achieves the same goal (variance reduction on the ensemble mean)
+  through a mechanism the API actually supports.
+* **Stratifying the tavern deck** — skipped. It is a second-order source of
+  variance (it only binds when a turn buys twice, or when the tavern-denial term
+  swings), and folding it into the same scalar would require an arbitrary
+  weighting against the draw statistic. The tavern deck stays iid across the K
+  worlds. This is the cleanest place to extend §4.3 if the pod run says
+  stratification helps.
+* **The search knobs themselves** (`Determinizations`, `Exploration`,
+  `PriorTemperature`, …) remain `const` and outside the weight key space, as in
+  §1.3. Only the four `search.*` keys above and `time.SliceBoost` are settable.
+
+### 4.5 Smoke measurements
+
+All on the 11-core Mac, `-to 10`, `scripts/bench.py Riptide BestMCTS3
+--pairs 12 --seed 3000 --workers 4` — **24 games per arm, seeds 3000–3011, both
+seats**. These numbers are **smoke-level indicators only**; see the null control
+below for why they cannot be read as strength.
+
+| Arm | Weight file | Wins / 24 | Rate | 95% CI (Wilson) | P1 / P2 | Other-factor ends |
+|---|---|---|---|---|---|---|
+| v2 baseline, **frozen pre-change binary** | *(none)* | 8 | 33.3 % | 18.0–53.3 % | 5/12, 3/12 | **0** |
+| mode 0 — mean (new binary, **identical logic**) | `agg0-mean.json` | 15 | 62.5 % | 42.7–78.8 % | 10/12, 5/12 | **0** |
+| mode 1 — vote | `agg1-vote.json` | 14 | 58.3 % | 38.8–75.5 % | 10/12, 4/12 | **0** |
+| mode 2 — mean − 1.0·sd | `agg2-penalty.json` | 12 | 50.0 % | 31.4–68.6 % | 9/12, 3/12 | **0** |
+| stratified determinization | `strat-on.json` | 15 | 62.5 % | 42.7–78.8 % | 11/12, 4/12 | **0** |
+
+**Zero tolerance line: `ends due to other factors` is 0 in all five batches, and
+no `[riptide] FATAL` line was emitted in any of the 120 games.** No
+`TURN_TIMEOUT`, no `BOT_EXCEPTION`, no `INCORRECT_MOVE`.
+
+**The null control is the only result here with any teeth, and it is a warning.**
+Rows 1 and 2 run *the same algorithm* — mode 0 is v2's aggregation rule, and the
+only differences between the two binaries on that path are two extra `double[n]`
+accumulators and one extra comparison per root move. They differ by **29.2
+points**, and a two-proportion test on that pair gives **z = −2.02, p = 0.04**:
+at this sample size the harness manufactures a "significant" difference between a
+build and itself. Every other comparison in the table is *less* extreme than
+that:
+
+| Comparison | z | p |
+|---|---|---|
+| mode 0 (new) vs mode 0 (frozen) — **same logic** | −2.02 | **0.04** |
+| mode 0 vs mode 1 (vote) | 0.30 | 0.77 |
+| mode 0 vs mode 2 (lambda = 1.0) | 0.87 | 0.38 |
+| mode 0 vs stratified | 0.00 | 1.00 |
+
+Pooling the two mode-0 arms gives **23/48 = 47.9 %** (CI 34.5–61.7 %), which is
+the best estimate of the unchanged bot on this seed block and sits between every
+other arm. **The correct reading of this table is that all four arms are
+indistinguishable and the experiment has no power**, not that mode 2 is worse or
+that stratification helps. Detecting a 10-point effect at 80 % power needs
+**~390 games per arm**; each arm here is 24.
+
+What the smoke run *does* establish, which is what a smoke run is for:
+
+* all three aggregation modes and stratified sampling **run to completion at
+  competition timing with zero fatal ends**, over 120 games;
+* the weight keys reach the search — the audit line reports
+  `agg=0/1/2`, `lam=`, `strat=1x4` per arm;
+* the modes are **live but sparse** (§4.2: ~5.5 % of root decisions overridden);
+* stratification costs **0–2 ms per turn** and did not push a single turn near
+  the ceiling.
+
+#### Incidental finding: greedy fallbacks are not actually zero
+
+§3.4 reports "Greedy fallbacks: 0" from a **2-game** diagnostic run. Widening
+that to 6–8 game runs (`RIPTIDE_DIAG=1`, vs `BestMCTS3`, `-to 10`) shows the
+panic path does fire, in **both** the frozen pre-change binary and the new one:
+
+| Build | Runs | Turns | Searched decisions | Panic fallbacks | Turns containing one | Worst turn | Max overrun |
+|---|---|---|---|---|---|---|---|
+| v2, frozen | 3 | 334 | 2 909 | 8 | **2 (0.6 %)** | 9.03 s | 0.052 s |
+| v2.1, mode 0 | 3 | 327 | 2 859 | 23 | **5 (1.5 %)** | 9.02 s | 0.024 s |
+
+They are **concentrated**: one or two pathological turns per ~120-turn run
+account for every event, which is exactly the failure mode v2 §3.5 already names
+— `decisionsPerTurn` is a single EWMA over a 7–17 spread, so an unusually long
+turn following short ones front-loads and pushes its own tail into the fallback.
+
+Two turns versus five is not a difference this data can support (Poisson,
+p ≈ 0.26), and there is no mechanism in the diff that could produce one: with
+`search.Stratify = 0` the seed loop is byte-for-byte v2's, and the aggregation
+change adds two `double[n]` accumulators per decision against a 16 000-node
+budget. **It is recorded here because §3.4's "0" was measured on too few games
+and should not be quoted as an invariant**, not because the change caused it.
+
+Safety is unaffected either way: zero `[riptide] FATAL` lines, worst turn 9.03 s
+against the 9.3 s self-ceiling, worst overrun past our own deadline 0.052 s
+against a 0.70 s margin, and zero other-factor ends in all 120 benchmark games.
+The greedy fallback is the designed escape hatch, not a failure.
+
+
+### 4.6 The pod A/B — recipes
+
+The decision this change exists to enable **cannot be made on a laptop**. §3.5
+already established the noise floor empirically: the *same shipped binary on the
+same 12 pairs* scored 14/24 and 8/24. §4.2 adds the second reason: the vote and
+penalty modes override plain-mean aggregation on only ~5.5 % of root decisions,
+so the per-game effect size is small by construction. n = 24 is a smoke test for
+"does it run and is it safe", not a strength measurement, and §4.5 is reported on
+that basis only.
+
+Everything needed for the real run is already in the repo — the arms are weight
+files, the binary is one build:
+
+| Arm | Weight file | Keys |
+|---|---|---|
+| control | `weights/agg0-mean.json` | `search.Aggregation: 0` |
+| vote | `weights/agg1-vote.json` | `search.Aggregation: 1` |
+| penalty, low | `weights/agg2-penalty-l0.3.json` | `2`, `search.DisagreementLambda: 0.3` |
+| penalty, mid | `weights/agg2-penalty.json` | `2`, `lambda: 1.0` |
+| penalty, high | `weights/agg2-penalty-l3.0.json` | `2`, `lambda: 3.0` |
+| stratified | `weights/strat-on.json` | `search.Stratify: 1`, `Oversample: 4` |
+| stratified, wide | `weights/strat-on-x8.json` | `search.Stratify: 1`, `Oversample: 8` |
+| vote + stratified | `weights/agg1-vote-strat.json` | both |
+
+```bash
+RIPTIDE_WEIGHTS=/abs/path/weights/agg1-vote.json \
+  python3 scripts/bench.py Riptide BestMCTS3 --pairs 64 --seed 5000 \
+                           --timeout 10 --workers 20
+```
+
+**Plan.**
+
+1. **Stage 1 — is the aggregation axis alive at all?** Three arms
+   (`agg0-mean`, `agg1-vote`, `agg2-penalty` at `lambda = 1.0`) at
+   **n = 128 per arm** (64 mirror pairs), same seed block for all three so the
+   deal luck is paired across arms. Pod calibration (`docs/pod-calibration.md`)
+   puts 20 workers at ~673 games/hr, so three arms is ~35 min of wall time.
+   At n = 128 the standard error on one arm is ~4.4 points and on a difference
+   ~6.2 points, so this stage can detect a ~12-point effect and nothing smaller.
+   Treat it as a screen, not a verdict.
+2. **Stage 2 — only if stage 1 separates.** Take the leader plus the control to
+   **n ≥ 512 per arm** (~1.5 h at 20 workers) and, for mode 2, sweep
+   `lambda ∈ {0.3, 1.0, 3.0}` at n = 128 first to pick the value that goes
+   forward.
+3. **Stage 3 — stratification, independently.** `strat-on` vs `agg0-mean` at
+   n ≥ 256. This one is a *variance* intervention, not a policy change, so it
+   should be evaluated on its own axis and only then combined with the winning
+   aggregation mode (`agg1-vote-strat`). Its expected effect size is smaller than
+   the aggregation modes', so it needs the larger n, not the smaller.
+4. **Every batch is invalid if `ends due to other factors` is nonzero**, and
+   `bench.py` surfaces both that count and any `[riptide] FATAL` line so the
+   batch can be attributed rather than just discarded.
+5. **Confirm the arm actually took effect** before trusting any number: with
+   `RIPTIDE_WEIGHTS` set the bot prints
+   `[riptide] weights '<path>' overrides=N … agg=<mode> lam=<lambda> breadth=<b> strat=<s>x<over>`
+   to stderr. The `agg`/`lam`/`strat` fields were added for exactly this — two
+   arms that silently share a mode would produce a beautifully tight,
+   meaningless null result.
+
+**Do not ship a mode change off stage 1 alone.** The honest prior is that all
+three modes are within a few points of each other, and §3.5's history on this bot
+is that point estimates at small n have pointed the wrong way before.
+
+### 4.7 Residual risks and known gaps
+
+* **Neither mode is demonstrated to help.** They are motivated by a real defect
+  (v1 §3.1) and they demonstrably change ~5.5 % of root decisions, but no run in
+  this document has the power to say whether that helps or hurts. Default stays
+  mode 0.
+* **The vote is over per-world *optima*, which is only a partial fix.** Mode 1
+  removes the *averaging* of optima but each world's vote is still cast for the
+  move that is best under perfect knowledge of that world. A full fix is a
+  policy that must be committed to *before* the world is revealed — i.e. scoring
+  each root move by its value under a *fixed* continuation across worlds. That is
+  a larger change to `Iterate`'s backup and is not attempted here.
+* **`BreadthBonus` interacts with mode 1.** It is applied to the tiebreak score,
+  so on the (common) turns where votes are unanimous, mode 1 reduces exactly to
+  mode 0. That is intended, but it means the measured 5.5 % override rate is a
+  property of this bonus value as well as of the mode.
+* **Stratification is on one scalar.** Two worlds with the same
+  `WorldDrawStat` can still differ in ways the search cares about (card
+  *identity*, not just value; tavern order). Stratifying on a scalar removes the
+  between-strata variance of that scalar only.
+* **`WorldDrawStat` uses `CardValues.HandValue`,** which is itself a hand-written
+  table the tuner is allowed to move (`card.*.hand` keys, §1.2). So the
+  stratification key drifts with the evaluation. This is defensible — the key
+  *should* track what we think a card is worth — but it means a tuning run and a
+  stratification A/B are not fully independent.
+* **The opponent-hand conclusion is architecture-specific, not general.** §4.1 is
+  a statement about *this* bot. Add an opponent-turn lookahead and every part of
+  it stops holding.
+* **The greedy fallback fires on ~1 % of turns**, in both builds (§4.5). Not
+  introduced here and not a safety problem, but §3.4's "0" is now known to be an
+  artefact of a 2-game sample, and the `decisionsPerTurn` EWMA remains the
+  mechanism to fix if it ever matters.
+* **The smoke run is a single 12-pair seed block.** All five arms share seeds
+  3000–3011, which is good for pairing across arms and useless for
+  generalisation: a seed block that happens to favour one style would move every
+  arm together. The pod plan (§4.6) uses a fresh block.
