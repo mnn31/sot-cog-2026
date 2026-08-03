@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>ReplayRecorder</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="TalesOfTribute">
+      <HintPath>/Users/manan/WORK/COG/scripts-tribute/ScriptsOfTribute-Core/Bots/bin/Release/netstandard2.1/TalesOfTribute.dll</HintPath>
+    </Reference>
+    <Reference Include="Bots">
+      <HintPath>/Users/manan/WORK/COG/scripts-tribute/ScriptsOfTribute-Core/Bots/bin/Release/netstandard2.1/Bots.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+
+</Project>
