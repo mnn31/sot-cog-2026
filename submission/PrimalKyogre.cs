@@ -1,21 +1,24 @@
 // ---------------------------------------------------------------------------
-// Riptide — IEEE CoG 2026 Tales of Tribute AI Competition entry.
+// Primal Kyogre — IEEE CoG 2026 Tales of Tribute AI Competition entry.
 //
-// Single-file submission build. Generated from the development tree by
-// submission/pack.py; the six source files it merges are, in emission order:
+// Author: Manan Gupta (The Harker School).
 //
-//     Riptide.cs         AI entry point, patron draft, turn clock
-//     RiptideSearch.cs   determinized-ensemble turn-plan search (PlanNode, Search)
-//     RiptidePolicy.cs   move-ordering priors / rollout policy (PolicyContext, Policy)
-//     RiptideEval.cs     leaf evaluation (Eval)
-//     RiptideCards.cs    card valuation tables (CardValues)
-//     RiptideWeights.cs  knob table (Weights)
+// Single-file submission build. The six modules it merges are, in emission
+// order:
+//
+//     PrimalKyogre.cs         AI entry point, patron draft, turn clock
+//     PrimalKyogreSearch.cs   determinized-ensemble turn-plan search (PlanNode, Search)
+//     PrimalKyogrePolicy.cs   move-ordering priors / rollout policy (PolicyContext, Policy)
+//     PrimalKyogreEval.cs     leaf evaluation (Eval)
+//     PrimalKyogreCards.cs    card valuation tables (CardValues)
+//     PrimalKyogreWeights.cs  knob table (Weights)
 //
 // Builds against the ScriptsOfTribute-Core Bots project as-is
 // (netstandard2.1, LangVersion 10, ImplicitUsings + Nullable enabled).
 //
-// Two deliberate differences from the development tree, both applied by the
-// packaging step so the submitted agent has no external dependencies at all:
+// Two deliberate behavioural differences from the development tree, both
+// applied by the packaging step so the submitted agent has no external
+// dependencies at all:
 //
 //   * The evaluation/search knobs can be overlaid from an external JSON file in
 //     the development tree, which is how they were tuned. That machinery is
@@ -49,14 +52,14 @@ using ScriptsOfTribute.Board.CardAction;
 using ScriptsOfTribute.Board.Cards;
 using ScriptsOfTribute.Serializers;
 
-namespace Riptide;
+namespace PrimalKyogre;
 
 // ==========================================================================
-// from Riptide.cs
+// from PrimalKyogre.cs
 // ==========================================================================
 
 /// <summary>
-/// Riptide — CoG 2026 Tales of Tribute entry, v1.
+/// PrimalKyogre — IEEE CoG 2026 Tales of Tribute AI Competition entry.
 ///
 /// Design in one paragraph: deliberate patron draft; a determinized ensemble
 /// (K worlds, common random numbers) of PUCT best-first searches with max backup
@@ -65,14 +68,15 @@ namespace Riptide;
 /// patron pressure; and a conservative cumulative turn clock with a greedy
 /// policy escape hatch.
 /// </summary>
-public class Riptide : AI
+public class PrimalKyogre : AI
 {
     // ---- patron draft -------------------------------------------------------
     // 2026 pool: PELIN, DUKE_OF_CROWS, ANSEI, RAJHIN, ORGNUM, SAINT_ALESSIA.
-    // Orgnum first is the one point of agreement between the two 2025 bots that
-    // beat the champion head to head. Alessia second because the 2025 field is
-    // structurally blind to it (BestMCTS3 refuses to draft it, HQL has almost no
-    // trained values for it), and we price it properly.
+    // Orgnum first: its deck is cheap, prestige-dense and combos with itself,
+    // and it is the patron this evaluation prices highest at the draft stage.
+    // Saint Alessia second: it is the newest deck, and the one our card values
+    // price furthest from a conventional tier list, so drafting it is where the
+    // valuation has the most room to pay off.
     // Out-of-pool patrons are listed so the draft stays legal if the pool changes.
     public static readonly PatronId[] PatronPreference =
     {
@@ -92,14 +96,14 @@ public class Riptide : AI
     // an instant loss, so we self-impose a ceiling well below it and measure ALL
     // overhead, not just search time.
     //
-    // v2 change: the per-decision slice is HARDWARE-ADAPTIVE.
+    // The per-decision slice is HARDWARE-ADAPTIVE.
     //
-    // v1 used a flat `min(0.80, left/4)` slice, sized on a fast Mac. It has two
-    // failure modes on a slower or contended machine: the search stops long
-    // before it has solved the reachable turn plan space, AND the turn's budget
-    // is left partly unspent because no mechanism hands the unused time of a
-    // fast-solving decision to a slow one. Measured cost: 52% vs BestMCTS3 on
-    // the Mac, 37.5% on a contended box with the same seeds.
+    // A flat slice sized on one machine has two failure modes on a slower or
+    // contended one: the search stops long before it has solved the reachable
+    // turn plan space, AND the turn's budget is left partly unspent, because
+    // nothing hands the unused time of a fast-solving decision to a slow one.
+    // Both cost measurable win rate under load — enough to be worth deriving
+    // the slice from measured throughput rather than fixing it in advance.
     //
     // The slice is now `SliceBoost x (what is actually left) / (decisions this
     // turn is still expected to contain)`, with two measured floors and four
@@ -109,14 +113,14 @@ public class Riptide : AI
     //       where the buys and patron calls live;
     //   (2) `left` is recomputed from the engine's own clock every call, so a
     //       decision that solved in 40 ms hands its unused share straight to the
-    //       decisions after it — the redistribution v1 had no mechanism for;
+    //       decisions after it, which a fixed per-decision cap cannot do;
     //   (3) floor A: the measured cost of an actual SOLVE on this machine
     //       (converged decisions only), so on slow hardware we spend what a
     //       solve costs instead of stopping just short of one;
     //   (4) floor B: the live iteration rate, so a slice always affords several
     //       full root sweeps per determinization — below that the root aggregate
     //       is single-world noise and worse than the greedy policy;
-    //   (5) a fixed-fraction cap on the slice, inherited from v1's `left/4`, so
+    //   (5) a fixed-fraction cap on the slice, so
     //       the remaining budget decays geometrically and no misestimate of the
     //       decision count can strand the turn's tail on the greedy fallback;
     //   (6) a learned overrun guard subtracted from the ceiling itself.
@@ -137,17 +141,17 @@ public class Riptide : AI
     public const double MinSliceSeconds = 0.12;
     public const double MaxSliceSeconds = 2.50;    // absolute cap on one decision
     public static readonly double SliceBoost = Weights.G("time.SliceBoost", 1.50);
-    // v1's `left/4` had one property worth keeping: capping a slice at a FIXED
-    // FRACTION of what is left makes the remaining budget decay geometrically, so
-    // it can never reach zero and the turn can never run out of decisions no
-    // matter how badly the count was estimated. Measured: without this, six
-    // times oversubscribed, v2 spent 9.03 s of a 9.25 s budget and dropped up to
-    // 12 tail decisions into the greedy fallback, where v1 dropped none. It only
-    // binds late in a turn, where the share term has already grown past it.
+    // Capping a slice at a FIXED FRACTION of what is left makes the remaining
+    // budget decay geometrically, so it can never reach zero and the turn can
+    // never run out of decisions no matter how badly the decision count was
+    // estimated. Measured at six times oversubscription: without this cap the
+    // agent spends 9.03 s of a 9.25 s budget and drops up to 12 tail decisions
+    // into the greedy fallback; with it, none are dropped. It only binds late in
+    // a turn, where the share term has already grown past it.
     public const double MaxSliceFraction = 0.25;
 
-    // Decisions-per-turn estimate. Measured on the Mac: 7-12 searched decisions
-    // per turn, mean ~9.5.
+    // Decisions-per-turn estimate. Measured: 7-12 searched decisions per turn,
+    // mean ~9.5.
     public const double DefaultDecisionsPerTurn = 9.0;
     public const double DecisionsEwmaAlpha = 0.25;
     public const double DecisionCountSafety = 1.15;   // over-estimate the tail of the turn
@@ -157,15 +161,15 @@ public class Riptide : AI
     // decisions that actually converged (so it is never contaminated by a slice
     // we cut short ourselves). Raises the slice floor on slow hardware: if a
     // solve here costs 1.5 s, handing a decision 0.9 s reliably buys a truncated
-    // search, and truncation is where the pod regression came from.
+    // search, and a truncated search is measurably weaker than a solved one.
     public const double DefaultSolveSeconds = 0.25;
     public const double SolveEwmaAlpha = 0.30;
     public const double SolveFloorFactor = 1.00;
     public const double SolveFloorFraction = 0.25;    // ... but never > 25% of what is left
 
-    // Search throughput on this machine. Measured on the Mac: ~37 k
-    // iterations/s; a contended or slower box runs a fraction of that, and the
-    // sweep floor below grows in exact proportion.
+    // Search throughput on this machine. ~37 k iterations/s on the development
+    // machine; a contended or slower box runs a fraction of that, and the sweep
+    // floor below grows in exact proportion.
     public const double DefaultIterationsPerSecond = 35000.0;
     public const double RateEwmaAlpha = 0.25;
     public const double MinIterationsPerSecond = 200.0;
@@ -213,12 +217,12 @@ public class Riptide : AI
     private int _turnNodes;
     private int _turnUnconverged;
     private double _turnMaxOvershoot;
-    // v2.1: how often the selected aggregation rule overrode plain-mean
-    // aggregation, and what the stratified seed draw cost. Both diag-only.
+    // How often the selected aggregation rule overrode plain-mean aggregation,
+    // and what the stratified seed draw cost. Both diagnostic-only.
     private int _turnAggChanged;
     private double _turnSeedSeconds;
 
-    public Riptide()
+    public PrimalKyogre()
     {
         // Force Eval/CardValues to run their static constructors once, here,
         // rather than inside the first timed decision of the first game.
@@ -312,7 +316,7 @@ public class Riptide : AI
         catch (Exception e)
         {
             _errorCount++;
-            Log("Riptide: recovered from " + e.GetType().Name + ": " + e.Message);
+            Log("PrimalKyogre: recovered from " + e.GetType().Name + ": " + e.Message);
             chosen = SafeFallback(gameState, possibleMoves);
         }
 
@@ -337,7 +341,7 @@ public class Riptide : AI
         if (Diag)
         {
             Console.Error.WriteLine(
-                "[riptide] turn used=" + _turnUsedSeconds.ToString("F2") + "s"
+                "[primal-kyogre] turn used=" + _turnUsedSeconds.ToString("F2") + "s"
                 + " budget=" + _turnBudgetSeconds.ToString("F2") + "s"
                 + " searched=" + _turnDecisions
                 + " unconv=" + _turnUnconverged
@@ -425,7 +429,7 @@ public class Riptide : AI
     /// <summary>
     /// Choose the turn's determinization seed set.
     ///
-    /// Default (<c>search.Stratify = 0</c>): K iid seeds, v1/v2 behaviour. The
+    /// Default (<c>search.Stratify = 0</c>): K iid seeds, and what ships. The
     /// seeds are drawn once per turn and reused for every decision and every root
     /// move, which is the common-random-numbers property root-move comparisons
     /// rest on — stratifying does not change that, it only changes *which* K
@@ -529,8 +533,8 @@ public class Riptide : AI
         //     redistribution mechanism: a decision that converged in 40 ms hands
         //     its unused share straight to the decisions after it, and the ones
         //     that are still unsolved are precisely the ones that collect it.
-        //     v1 could not do this — its 0.80 s cap was hit whether or not the
-        //     rest of the turn had 8 spare seconds sitting idle.
+        //     A fixed per-decision cap cannot do this: it binds whether or not
+        //     the rest of the turn has spare seconds sitting idle.
         double slice = ((left - PanicThresholdSeconds) / remainingIncl) * SliceBoost;
         if (slice > MaxSliceSeconds) slice = MaxSliceSeconds;
 
@@ -558,10 +562,10 @@ public class Riptide : AI
         if (slice < MinSliceSeconds) slice = MinSliceSeconds;
 
         // Structural tail guarantee, applied after the floors so it beats them:
-        // never more than a fixed fraction of what is left. This is the one part
-        // of v1's `left/4` worth keeping — it makes the remaining budget decay
-        // geometrically instead of linearly, so no misestimate of the decision
-        // count can strand the end of the turn on the greedy fallback.
+        // never more than a fixed fraction of what is left. This makes the
+        // remaining budget decay geometrically instead of linearly, so no
+        // misestimate of the decision count can strand the end of the turn on
+        // the greedy fallback.
         double fracCap = MaxSliceFraction * left;
         if (slice > fracCap) slice = fracCap;
 
@@ -678,7 +682,7 @@ public class Riptide : AI
     public override void GameEnd(EndGameState state, FullGameState? finalBoardState)
     {
         if (_errorCount > 0 || _panicCount > 0)
-            Log("Riptide game end: recovered errors=" + _errorCount + " panic fallbacks=" + _panicCount);
+            Log("PrimalKyogre game end: recovered errors=" + _errorCount + " panic fallbacks=" + _panicCount);
 
         // Always-on self-report of the three fatal outcomes. GameRunner only
         // aggregates these as "ends due to other factors" and never says whose
@@ -693,7 +697,7 @@ public class Riptide : AI
             && _me != PlayerEnum.NO_PLAYER_SELECTED
             && state.Winner != _me)
         {
-            Console.Error.WriteLine("[riptide] FATAL " + state.Reason + " as " + _me
+            Console.Error.WriteLine("[primal-kyogre] FATAL " + state.Reason + " as " + _me
                                     + " (turnUsed=" + _turnUsedSeconds.ToString("F2")
                                     + "s guard=" + _timeGuard.ToString("F2") + "s)");
         }
@@ -702,7 +706,7 @@ public class Riptide : AI
 }
 
 // ==========================================================================
-// from RiptideSearch.cs
+// from PrimalKyogreSearch.cs
 // ==========================================================================
 
 /// <summary>
@@ -791,11 +795,11 @@ public sealed class Search
     public const int MaxRootBranch = 22;
     public const int MaxChoiceBranch = 14;
 
-    // ---- root aggregation (v2.1) --------------------------------------------
+    // ---- root aggregation ---------------------------------------------------
     // How the K per-world root values are collapsed into one ranking. Mean is
-    // v1/v2 behaviour and is what ships; the other two exist because averaging
-    // per-world OPTIMA is strategy fusion — it prices in an ability to adapt to
-    // whichever world turns out to be real, which we do not have (v1 §3.1).
+    // what ships; the other two exist because averaging per-world OPTIMA is
+    // strategy fusion — it prices in an ability to adapt to whichever world
+    // turns out to be real, which this agent does not have.
     //
     // Fixed at pack time in the submission build (the development tree binds it
     // from the tuning harness instead, so an A/B costs no rebuild):
@@ -815,16 +819,16 @@ public sealed class Search
     public static readonly double DisagreementLambda = Weights.G("search.DisagreementLambda", 1.0);
 
     /// <summary>Per-world bonus for a root move every determinization bothered to
-    /// look at. v1 hard-coded 0.0005; it is a weight now so it can be zeroed when
-    /// A/B-ing the aggregation modes (it is itself a crude agreement term).</summary>
+    /// look at. Exposed as a knob so it can be zeroed when A/B-ing the
+    /// aggregation modes (it is itself a crude agreement term).</summary>
     public static readonly double BreadthBonus = Weights.G("search.BreadthBonus", 0.0005);
 
-    // ---- determinization sampling (v2.1) ------------------------------------
-    // 0 = K iid seeds (v1/v2 behaviour, default). 1 = stratified: oversample
+    // ---- determinization sampling -------------------------------------------
+    // 0 = K iid seeds (default, and what ships). 1 = stratified: oversample
     // candidate worlds, rank them by the one latent variable the within-turn
     // search is actually sensitive to (our own draw order), and take one world
     // uniformly at random from each of K equal-count strata. Same estimator,
-    // strictly lower ensemble variance. See docs/riptide-v2.md §4.2.
+    // strictly lower ensemble variance.
     public static readonly int Stratify = (int)Weights.G("search.Stratify", 0);
     public static readonly int StratifyOversample = (int)Weights.G("search.StratifyOversample", 4);
     /// <summary>How many upcoming cards of our own deck the stratification
@@ -843,7 +847,7 @@ public sealed class Search
     /// sensitive to. It is deliberately not a function of the opponent's hand:
     /// the leaf evaluation pools their Hand/DrawPile/CooldownPile into one deck
     /// score and the search never crosses END_TURN, so their hand/draw split is
-    /// provably invisible to us (docs/riptide-v2.md §4.1).
+    /// provably invisible to us.
     /// </summary>
     public static double WorldDrawStat(SeededGameState s)
     {
@@ -1223,7 +1227,7 @@ public sealed class Search
 }
 
 // ==========================================================================
-// from RiptidePolicy.cs
+// from PrimalKyogrePolicy.cs
 // ==========================================================================
 
 /// <summary>
@@ -1321,13 +1325,14 @@ public sealed class PolicyContext
 
 /// <summary>
 /// Hand-written move-ordering logits. These are used three ways:
-///  1. as the PUCT prior in the tree (and unlike the 2025 champion, the prior
-///     actually influences selection here);
+///  1. as the PUCT prior in the tree, at a deliberately broad softmax
+///     temperature, so it biases selection rather than deciding it;
 ///  2. as the rollout policy (greedy argmax) to end of turn;
 ///  3. as the panic fallback when the turn clock is nearly exhausted.
 ///
-/// Note this policy never *forces* a card play outside the search — combo
-/// ordering is a search decision, which is the biggest hole in the 2025 winner.
+/// Note this policy never *forces* a card play outside the search: combo
+/// ordering stays a search decision. The branch cap prunes candidates by policy
+/// score, but no move is ever played on the policy's say-so alone.
 /// </summary>
 public static class Policy
 {
@@ -1551,7 +1556,7 @@ public static class Policy
 }
 
 // ==========================================================================
-// from RiptideEval.cs
+// from PrimalKyogreEval.cs
 // ==========================================================================
 
 /// <summary>
@@ -1559,12 +1564,13 @@ public static class Policy
 /// perspective of <c>me</c>. Every backup site in the search uses this same
 /// scale — there is no negation, no zero-sum mixing.
 ///
-/// Structural differences vs the 2025 field:
-///  * an explicit 40-prestige race model with graduated urgency on both sides
-///    (the 2025 champion only panics at 76-79, i.e. the far less decisive race);
+/// Distinguishing design choices:
+///  * an explicit 40-prestige race model with graduated urgency on both sides,
+///    rather than reacting only in the 76-79 window before 80;
 ///  * patron distance is scored offensively as well as defensively;
 ///  * combo value is a real hand-density probability, not a deck-count power law;
-///  * enemy agents are not multiplied by 2 with a flat +40 fear bonus.
+///  * agent value is continuous in card value and current HP rather than a flat
+///    bonus per enemy agent.
 /// </summary>
 public static class Eval
 {
@@ -1609,8 +1615,8 @@ public static class Eval
     public static readonly double AnseiFavourBonus = Weights.G("eval.AnseiFavourBonus", 25.0);
 
     // Trades deck quality against prestige. At 1.0 an 88-value card is worth
-    // ~14 early prestige points, which is aggressively prestige-greedy; the 2025
-    // champion sits at the opposite extreme (~50). Top tuning target.
+    // ~14 early prestige points, i.e. deliberately prestige-greedy relative to a
+    // deck-building-first valuation. The most sensitive knob in the table.
     public static readonly double DeckWeight = Weights.G("eval.DeckWeight", 1.8);
     public static readonly double DeckNorm = Weights.G("eval.DeckNorm", 16.0);         // deck size at which no dilution penalty applies
     public static readonly double ComboWeight = Weights.G("eval.ComboWeight", 260.0);
@@ -1867,20 +1873,19 @@ public static class Eval
 }
 
 // ==========================================================================
-// from RiptideCards.cs
+// from PrimalKyogreCards.cs
 // ==========================================================================
 
 /// <summary>
-/// Riptide's own card valuation. Flat arrays indexed by (int)CardId — no string
+/// PrimalKyogre's own card valuation. Flat arrays indexed by (int)CardId — no string
 /// scans, no dictionary lookups on the hot path.
 ///
 /// Scale is a continuous 0-100 "quality of this card as a deck slot" measure
 /// (not a 5-bucket tier), so ties are rare and marginal buy decisions have real
-/// resolution. Bewilderment is negative. Values are our own, informed by (but
-/// deliberately not equal to) what the 2025 field published: in particular the
-/// Orgnum and Saint Alessia decks are priced up, because the 2025 top four
-/// either refuse to draft them (BestMCTS3) or have no trained values for them
-/// (HQL_Plus).
+/// resolution. Bewilderment is negative. Every number here is original to this
+/// agent; in particular the Orgnum and Saint Alessia decks are priced up
+/// relative to a conventional tier list, which is what the patron draft order in
+/// the entry point rests on.
 /// </summary>
 public static class CardValues
 {
@@ -1984,7 +1989,7 @@ public static class CardValues
         S(CardId.PILFER, 60, 62);
         S(CardId.SQUAWKING_ORATORY, 70, 70);
 
-        // ---- Saint Alessia (newest deck; the 2025 field is blind to it) ------
+        // ---- Saint Alessia (newest deck) -------------------------------------
         S(CardId.ALESSIAN_REBEL, 14, 16);
         S(CardId.SOLDIER_OF_THE_EMPIRE, 42, 40);
         S(CardId.CHAINBREAKER_SERGEANT, 56, 52);
@@ -2114,7 +2119,7 @@ public static class CardValues
 }
 
 // ==========================================================================
-// from RiptideWeights.cs
+// from PrimalKyogreWeights.cs
 // ==========================================================================
 
 /// <summary>

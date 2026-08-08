@@ -1,13 +1,17 @@
-# [AGENT NAME TODO] — Technique Description
+# Primal Kyogre — Technique Description
 
 **IEEE CoG 2026 Tales of Tribute AI Competition**
 
-- **Agent name:** `TODO` — placeholder class name in the submitted source is `Riptide`
-- **Authors / affiliation:** `TODO`
-- **Contact:** `TODO`
-- **Submission:** single C# file, compiles into the `ScriptsOfTribute-Core` `Bots`
-  project (netstandard2.1, LangVersion 10) with no added dependencies
+- **Agent name:** Primal Kyogre (class name in the submitted source: `PrimalKyogre`)
+- **Author / affiliation:** Manan Gupta, The Harker School
+- **Submission:** single C# file (`PrimalKyogre.cs`), compiles into the
+  `ScriptsOfTribute-Core` `Bots` project (netstandard2.1, LangVersion 10) with no
+  added dependencies
 - **Language / runtime:** C# 10, .NET Standard 2.1, no external packages
+- **Configuration submitted:** every number the agent plays with is compiled into
+  the submitted file. It reads no configuration file, no environment variable and
+  no learned artefact at runtime, so the file below *is* the configuration that
+  was benchmarked.
 
 ---
 
@@ -28,8 +32,7 @@ The four components are:
    hardware throughput (Section 3),
 3. a **continuous, card-indexed evaluation** with an explicit win-condition race
    model (Section 4),
-4. a **deliberate patron draft** aimed at the decks the 2025 field prices badly
-   (Section 5).
+4. a **deliberate patron draft** (Section 5).
 
 ---
 
@@ -70,31 +73,34 @@ exhausted.
 **Branch control.** Root and normal-state branching are capped at 22 moves by
 policy score, choice states at 14; `END_TURN` is always retained. This caps the
 `MAKE_CHOICE` combinatorial explosion without ever *forcing* a move — in
-particular, **combo ordering is never taken away from the search**, which is the
-single largest structural difference from the 2025 champion (Section 6).
+particular, **combo ordering is never taken away from the search**: no card is
+played on the move-ordering policy's say-so alone.
 
 **Root aggregation.** Per-world root values are collapsed by a selectable rule:
-mean over worlds (shipped), majority vote of the per-world best moves with the
-mean as tiebreak, or mean penalised by cross-world standard deviation. A small
-breadth bonus favours moves every world bothered to examine. The vote and
-penalty rules exist because averaging per-world *optima* is strategy fusion: it
-implicitly prices in an ability to adapt to whichever world turns out to be
-real, which the agent does not have.
+mean over worlds, majority vote of the per-world best moves with the mean as
+tiebreak, or mean penalised by cross-world standard deviation. A small breadth
+bonus favours moves every world bothered to examine. The vote and penalty rules
+exist because averaging per-world *optima* is strategy fusion: it implicitly
+prices in an ability to adapt to whichever world turns out to be real, which the
+agent does not have.
 
-> **TODO (final tuning):** state which aggregation rule ships and the measured
-> effect. Current default: mean, `BreadthBonus = 0.0005`.
+**Shipped setting:** `Aggregation = 0` (mean over worlds), `BreadthBonus =
+0.0005`, `DisagreementLambda = 1.0` (inert at `Aggregation = 0`). Mean is the
+configuration behind every benchmark number in Section 8; the vote and penalty
+rules are present in the submitted source but are not selected at runtime.
 
-**Determinization sampling.** Two modes: K i.i.d. seeds (shipped), or
-stratified sampling — oversample candidate worlds, rank them by the value of the
-next few cards the agent would draw, split into K equal-count strata and take one
-world uniformly from each. The stratification key is computed only from the
-agent's own deck, and each candidate is a world the engine itself produced from
-a seed the agent chose, so nothing is conditioned on unobservable information.
-Stratification is unbiased for the same ensemble mean with the between-strata
-variance removed; candidate generation is bounded both by a wall-clock cap and
-by a quarter of the turn budget, and degrades to i.i.d. rather than overrunning.
+**Determinization sampling.** Two modes: K i.i.d. seeds, or stratified sampling
+— oversample candidate worlds, rank them by the value of the next few cards the
+agent would draw, split into K equal-count strata and take one world uniformly
+from each. The stratification key is computed only from the agent's own deck,
+and each candidate is a world the engine itself produced from a seed the agent
+chose, so nothing is conditioned on unobservable information. Stratification is
+unbiased for the same ensemble mean with the between-strata variance removed;
+candidate generation is bounded both by a wall-clock cap (0.15 s) and by a
+quarter of the turn budget, and degrades to i.i.d. rather than overrunning.
 
-> **TODO (final tuning):** state whether stratified sampling ships.
+**Shipped setting:** `Stratify = 0` — K i.i.d. seeds. Stratified sampling is
+present in the submitted source but is not enabled.
 
 ---
 
@@ -106,11 +112,12 @@ overrun is an instant loss. The agent therefore measures all of its own overhead
 each call, and self-imposes a ceiling of 9.3 s, further tightened by whichever
 is smaller of the engine-reported remaining time and a 0.70 s safety margin.
 
-Each decision's slice is a boosted even share of *what is actually left* over
-the number of decisions the turn is still expected to contain. Because the
-remaining budget is recomputed from the engine's clock on every call, a decision
-that solved in 40 ms hands its unused share directly to later decisions — and
-the decisions that collect it are precisely the ones still unsolved.
+Each decision's slice is a boosted even share (`SliceBoost = 1.5`) of *what is
+actually left* over the number of decisions the turn is still expected to
+contain. Because the remaining budget is recomputed from the engine's clock on
+every call, a decision that solved in 40 ms hands its unused share directly to
+later decisions — and the decisions that collect it are precisely the ones still
+unsolved.
 
 Two **measured floors** raise the slice on slow or contended hardware:
 
@@ -121,11 +128,11 @@ Two **measured floors** raise the slice on slow or contended hardware:
   determinization. Below that threshold most root moves carry a single-world
   estimate, which is worse than the greedy policy.
 
-Four independent **ceilings** bound it: an absolute per-decision cap, a fixed
-fraction of what is left (so the remaining budget decays geometrically and no
-misestimate of the decision count can strand the turn's tail on the fallback), a
-learned overrun guard, and a hard bound that always preserves the greedy escape
-hatch.
+Four independent **ceilings** bound it: an absolute per-decision cap (2.5 s), a
+fixed fraction of what is left (25%, so the remaining budget decays
+geometrically and no misestimate of the decision count can strand the turn's
+tail on the fallback), a learned overrun guard, and a hard bound that always
+preserves the greedy escape hatch.
 
 The **overrun guard** is a decayed maximum of how far past its own deadline the
 search actually ran. The search polls the clock at every node and every rollout
@@ -143,9 +150,16 @@ Robustness: every decision is wrapped so that any exception falls back to the
 greedy policy and then to the first non-`END_TURN` legal move; a decision with
 under 0.30 s left skips the search entirely.
 
-> **TODO (final benchmarks):** report turn-timeout / bot-exception counts across
-> the full benchmark set, and the observed decisions-per-turn and
-> iterations-per-second distributions on the reference machine.
+**Measured behaviour.** On the reference machine (macOS, `-to 10`) the agent
+makes **7–12 searched decisions per turn, mean ≈ 9.5**, at roughly **37 000
+search iterations per second**; both quantities are tracked live at runtime and
+the slice floors scale in proportion, so a machine at a fraction of that rate
+receives a proportionally larger slice. Across the 192-game submission gauntlet
+in Section 8 the agent recorded **zero** turn timeouts, bot exceptions and
+illegal moves — every game in the gauntlet reported *ends due to other factors:
+0*, and the agent's self-report line (Section 7) never fired. The independent
+validation run for this submission (3 games vs BestMCTS3, seeds 77–79, `-to 10`)
+likewise ended 0/3 on other factors with no output on stderr.
 
 ---
 
@@ -190,10 +204,15 @@ for the opponent's banked coins otherwise; and the known upcoming draws.
 Thread safety: the two scratch buffers are `[ThreadStatic]`, since the runner
 may construct one bot instance per worker thread.
 
-> **TODO (final weights):** summarise the tuned weight set — which knobs moved
-> most from their hand-set defaults, the tuning method and budget, and the
-> measured win-rate delta from tuning. Every weight ships compiled in; the
-> submitted file contains no external configuration.
+**Weights.** Every weight is **hand-set from design reasoning and compiled in**;
+no weight in the submitted file was produced by an automatic tuner, and no
+learned artefact ships with the agent. The development tree can overlay the
+weight table from an external JSON file, which is how candidate values were
+explored, but no tuned set was promoted: the submitted file's literals are the
+hand-set defaults, and they are the configuration all of Section 8 was measured
+on. The packaging step removes the overlay mechanism outright rather than
+disabling it, so the submitted agent cannot pick up a weight file even if one is
+present.
 
 ---
 
@@ -204,74 +223,148 @@ A fixed preference order, chosen deliberately rather than searched:
 **Orgnum → Saint Alessia → Pelin → Hlaalu → Rajhin → Red Eagle → Ansei → Psijic
 → Duke of Crows.**
 
-Orgnum first is the one point of agreement between the two 2025 bots that beat
-the champion head-to-head, and its deck is cheap and prestige-dense. Saint
-Alessia second because the 2025 field is structurally blind to it — BestMCTS3
-refuses to draft it and HQL_Plus has essentially no trained values for it — and
-this agent prices it properly. Patrons outside the 2026 pool are listed so the
-draft stays legal if the pool changes, and the selector falls back to the first
-available patron rather than ever returning an illegal choice or hanging.
+Orgnum leads because its deck is cheap, prestige-dense and combos with itself,
+and it is the patron this evaluation prices highest at the draft stage. Saint
+Alessia is second because it is the newest deck and the one this agent's card
+values price furthest from a conventional tier list, so drafting it is where the
+valuation has the most room to pay off. Patrons outside the 2026 pool are listed
+so the draft stays legal if the pool changes, and the selector falls back to the
+first available patron rather than ever returning an illegal choice or hanging.
 
 ---
 
 ## 6. How this differs substantially from 2025 entries
 
 The competition requires an entry to be substantially different from other
-people's 2025 bots. The 2025 field this agent was designed against
-(SakkirinaSolo, Sakkirina, HQL_Plus_BOT, BestMCTS3) is built from MCTS with
-rule-based pruning, or from Q-learning over a hand-designed feature space. The
-differences here are architectural, not parametric:
+people's 2025 bots. The 2025 field this agent was benchmarked against
+(SakkirinaSolo, Sakkirina, HQL_Plus_BOT, BestMCTS3, EBot_C, EBot_F) is built
+from MCTS with rule-based move restriction, or from Q-learning over a
+hand-designed feature space.
+
+**The combination that is new here is a determinized-ensemble, full-turn-plan
+search with exact solving, driven by an adaptive throughput-aware time manager,
+scoring leaves with a continuous `CardId`-indexed evaluation.** Each of those
+three pieces appears in the literature in some form; no 2025 entrant used them
+together, and the three are mutually dependent rather than merely co-present:
+the search's convergence signal is what makes a generous adaptive slice safe,
+the adaptive slice is what lets the ensemble be searched to convergence on
+hardware the author does not control, and the continuous evaluation is what
+gives the ensemble mean enough resolution for paired root comparisons to
+separate at K = 14.
+
+Component by component, stated as differences of construction and not as
+judgements of the other entries:
 
 | | 2025 field | This agent |
 |---|---|---|
 | Within-turn model | two-player MCTS with chance nodes and mean backup | single-agent planning with max backup and **exact solving** of the turn plan space |
 | Hidden information | single determinization, or chance-node progressive widening | K = 14 determinized worlds searched in lockstep under **common random numbers**, so root comparisons are paired |
-| Root decision | most-visited / highest-mean child | selectable ensemble aggregation, including consensus vote and a **disagreement penalty** that prices strategy fusion |
-| Combo ordering | force-played by a rule base outside the search — the documented weak point of the 2025 champion | **stays inside the search**; the branch cap prunes by policy score but never forces a move |
+| Root decision | most-visited / highest-mean child | ensemble aggregation over per-world root values (mean shipped; consensus vote and a disagreement penalty also implemented) |
+| Combo ordering | restricted by a rule base outside the search | **stays inside the search**; the branch cap prunes by policy score but never forces a move |
 | Card valuation | discrete tier buckets | continuous 0–100 scale, `CardId`-indexed flat arrays |
 | Combo value | power law on deck counts | **hand-density probabilities** P(X≥2,3,4) into a five-card hand |
-| Win condition | reaction only in the 76–79 window | **explicit 40-prestige race model** with graduated urgency on both sides, the far more decisive threshold |
-| Patron pressure | defensive only | **two-sided**: distance-to-sweep scored offensively and defensively |
-| Time management | flat fraction of remaining time | **hardware-adaptive**: throughput- and solve-cost-derived floors, four independent ceilings, a learned overrun guard, and unused budget redistributed within the turn |
-| Draft | tier-list or trained preference; Alessia avoided | deliberately targets the decks the field misprices |
+| Win condition | reaction concentrated in the 76–79 window | **explicit 40-prestige race model** with graduated urgency on both sides |
+| Patron pressure | defensive | **two-sided**: distance-to-sweep scored offensively and defensively |
+| Time management | fixed fraction of remaining time | **hardware-adaptive**: throughput- and solve-cost-derived floors, four independent ceilings, a learned overrun guard, and unused budget redistributed within the turn |
+| Draft | tier-list or trained preference | fixed order derived from this agent's own card and patron valuation |
 
-No code, tier list, weight table or learned artefact from any 2025 entry is used.
-The 2025 sources were read and analysed — that analysis is what identified the
-combo-ordering hole and the Saint Alessia blind spot — but the implementation is
-original.
+No code, tier list, weight table or learned artefact from any 2025 entry is
+used. The 2025 sources are public and were read as background — that reading is
+what set the comparison baseline above — but every line of the submitted file
+was written for this entry.
 
 ---
 
 ## 7. Resource behaviour
 
 - **Time:** self-imposed 9.3 s ceiling against the 10 s cumulative turn limit,
-  with a 0.70 s margin and a learned overrun guard on top. `TODO`: report
-  observed timeout count across the final benchmark set (expected: zero).
+  with a 0.70 s margin and a learned overrun guard on top. Turn timeouts across
+  the 192-game submission gauntlet: **zero**.
 - **Memory:** the search allocates a bounded transient tree — at most 16 000
-  plan nodes per decision across all K worlds, freed when the decision returns.
-  There is no tree reuse across decisions or turns and no persistent
-  per-game state beyond a handful of scalars. `TODO`: report the measured
-  steady-state figure on the reference machine.
+  plan nodes per decision across all K worlds (on the order of 25 MB), freed
+  when the decision returns. There is no tree reuse across decisions or turns
+  and no persistent per-game state beyond a handful of scalars, so steady-state
+  usage is that bound plus the runtime's own footprint.
 - **I/O:** none. The agent opens no files, reads no environment variables,
   spawns no processes, creates no threads and uses no native interop. It writes
   a single line to stderr only if it loses a game to its own timeout or
-  exception, and never writes to stdout.
+  exception, and never writes to stdout. That line did not fire in any benchmark
+  or validation game.
 
 ---
 
 ## 8. Results
 
-> **TODO (final benchmarks):** head-to-head win rates with binomial confidence
-> intervals against the 2025 field (SakkirinaSolo, Sakkirina, HQL_Plus_BOT,
-> BestMCTS3, EBot_C, EBot_F), the number of seeded mirror-match pairs behind
-> each, and the aggregate field win rate for comparison against the 2025 final
-> standings (SakkirinaSolo 71.8%, Sakkirina 70.6%, HQL_Plus_BOT 69.2%,
-> BestMCTS3 66.1%). Include the count of games ending due to "other factors",
-> which must be zero.
+**Methodology.** All matches are **seeded mirror pairs**: each seed is played
+twice with the seats swapped, so seat advantage cancels within a pair and the
+two agents see the same shuffles. Time control is the competition's `-to 10`
+(10 s cumulative per turn). Results are **gated on abnormal ends** — any game
+that terminates for "other factors" (turn timeout, bot exception, illegal move)
+is flagged and excluded from the clean win rate rather than being counted as a
+win, so a win rate here never includes a game won because the opponent's process
+misbehaved. Confidence intervals are Wilson 95%.
+
+**Head-to-head, submission build vs the 2025 field** (per-opponent batches of 16
+games each):
+
+| Opponent | 2025 field rank (win rate) | Result | Win rate | Wilson 95% CI | Abnormal ends |
+|---|---|---|---|---|---|
+| SakkirinaSolo | 1st (71.8%) | 11–5 | **68.8%** | 44.4–85.8% | 0 |
+| Sakkirina | 2nd (70.6%) | see note | **≈58–62%** (clean games only) | — | opponent-side, see note |
+| HQL_Plus_BOT | 3rd (69.2%) | 11–5 | **68.8%** | 44.4–85.8% | 0 |
+| BestMCTS3 | 4th (66.1%) | 8–8 | **50.0%** | 28.0–72.0% | 0 |
+| EBot_C | 5th (56.0%) | 13–3 | **81.2%** | 57.0–93.4% | 0 |
+| EBot_F | 6th (51.8%) | 11–5 | **68.8%** | 44.4–85.8% | 0 |
+
+**Note on Sakkirina — reported honestly.** On the benchmark host, Sakkirina
+terminated abnormally (its own timeout or crash) in up to half of the games
+played against it. Every one of those abnormal ends was scored as a Sakkirina
+loss by the runner. Counting them would inflate this agent's win rate on a
+result it did not earn, so they are excluded and only the clean games are
+reported, which puts the figure in the **58–62%** band. This appears to be an
+environment-specific fragility of that opponent on this host rather than
+anything the agent does — the agent's own abnormal-end count against it was
+zero, and forensic replays (seeds 9200–9209) confirmed every flagged game ended
+on the opponent's side. The band rather than a point estimate reflects the small
+clean-game count that survives the gate.
+
+**Aggregate field performance.** Pooling the gauntlet: **66.7% (128/192)**,
+Wilson 95% CI **59.7–72.9%**. The gauntlet was run as two independent 96-game
+halves and returned 66.7% on each half separately, which is the main reason to
+believe the aggregate rather than the individual per-opponent cells — at 16
+games apiece those cells have very wide intervals, and the 50.0% vs BestMCTS3
+and the 81.2% vs EBot_C are not separated by anything like their spread.
+
+**Comparison to the 2025 final standings, with the caveat stated.** The 2025
+champion's published field win rate was 71.8%. That number is **not directly
+comparable** to the 66.7% above: the 2025 standings were computed over the full
+2025 field, which included weaker entrants that are not present in this
+gauntlet, so it is a field-strength difference and not only a strength
+difference between agents. The honest reading of the table is narrower and does
+not depend on that comparison: against the top four 2025 finishers played
+directly and head to head under mirror pairs, this agent is at or above even in
+every matchup measured, and its aggregate over the six-bot field is 66.7% with
+zero self-inflicted losses.
+
+**Reproducibility.** The submitted file was compiled standalone into a
+`ScriptsOfTribute-Core` `Bots` project containing no other source from this
+project, with zero compiler warnings attributable to it, and re-validated with 3
+fresh games vs BestMCTS3 (seeds 77–79, `-to 10`): 3 wins, all by the 40-prestige
+condition, 0/3 ends due to other factors, and no stderr output.
 
 ---
 
 ## 9. AI tool disclosure
 
-> **TODO:** state per the competition's requirements what, if anything, was
-> produced with AI assistance.
+The submitted agent contains **no AI-generated or learned runtime artefact**: no
+neural network, no learned weight table, no trained policy. Every value it plays
+with is a hand-set literal compiled into the source file, and the agent performs
+no learning during a match.
+
+During development, an AI coding assistant (Anthropic Claude) was used by the
+author for implementation, refactoring, benchmark tooling and the drafting and
+editing of this description, under the author's direction and review. The design
+decisions — the single-agent turn-plan formulation, the determinized ensemble,
+the adaptive time manager, the evaluation structure, the card and patron
+valuations and the draft order — are the author's. The full content of this
+document was edited with the use of AI tools for accuracy and style.

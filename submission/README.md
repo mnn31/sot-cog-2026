@@ -1,7 +1,10 @@
 # Submission packaging
 
-How `RiptideSubmission.cs` is produced, what the packaging step changes, and how
-to rename the agent before sending it off.
+How `PrimalKyogre.cs` is produced and what the packaging step changes.
+
+The agent's development name is `Riptide` (that is still what `bot/*.cs` and the
+dev-tree Bots project use). The **competition name is Primal Kyogre**, and the
+rename is applied by `pack.py`, not by hand — see "Renaming the agent" below.
 
 The organizers accept **either** a single `.cs` file **or** a zip of all needed
 files, up to 25 MB. We ship the single file — it compiles into their
@@ -12,7 +15,7 @@ files, up to 25 MB. We ship the single file — it compiles into their
 ## Regenerating the merged file
 
 ```bash
-python3 submission/pack.py            # writes submission/RiptideSubmission.cs
+python3 submission/pack.py            # writes submission/PrimalKyogre.cs
 python3 submission/pack.py --check    # fails if the file is stale vs bot/*.cs
 ```
 
@@ -28,8 +31,9 @@ python3 submission/pack.py --check    # fails if the file is stale vs bot/*.cs
 | `bot/RiptideWeights.cs` | `Weights` |
 
 They are emitted in that order (entry point first) with `// ===` banners naming
-the file each block came from. Usings are deduplicated and sorted; `namespace
-Riptide;` appears exactly once.
+the file each block came from. Usings are deduplicated and sorted; the namespace
+appears exactly once. Everything is then renamed to the competition name, so the
+banners read `PrimalKyogre.cs`, `PrimalKyogreSearch.cs`, … in the shipped file.
 
 `using System;` and `using System.Collections.Generic;` are added explicitly
 even though `Bots.csproj` sets `ImplicitUsings=enable`, so the file also
@@ -92,12 +96,28 @@ that fires only when we lose a game to our own `TURN_TIMEOUT` / `BOT_EXCEPTION`
 only way a timing regression shows up as anything other than an unexplained
 number in an aggregate result. In the two validation games it printed nothing.
 
-**Comment rewrites.** A handful of comments referring to the tuning harness are
-rewritten so the shipped file does not describe machinery it no longer contains.
-Every one is an exact-text anchor asserted to match exactly once
-(`EDITS` in `pack.py`), and `pack.py` refuses to emit a file still containing
-`RIPTIDE_WEIGHTS`, `RIPTIDE_DIAG`, `GetEnvironmentVariable`, `File.ReadAllText`,
-`DllImport`, `stackalloc` or `unsafe`.
+**3. Comments are scrubbed for publication.**
+
+The shipped file gets published and read by other entrants, so its comments are
+rewritten for a reader who has never seen this repository. Three classes go:
+
+| class | example in the dev tree | what ships |
+|---|---|---|
+| internal doc citations | `See docs/riptide-v2.md §4.2.` | dropped; the claim stands on its own |
+| dev-diary voice | `v1 used a flat slice sized on a fast Mac`, `truncation is where the pod regression came from`, `v2.1:` section markers | restated as a property of the code, version- and host-free |
+| pointed competitor commentary | `the biggest hole in the 2025 winner`, `the 2025 field is structurally blind to it` | design rationale kept and reworded as a fact about *this* agent; the judgement of other people's work dropped |
+
+Comments explaining **what** the code does and **why** a design was chosen are
+kept verbatim — the file is still meant to be readable.
+
+Every rewrite is an exact-text anchor asserted to match exactly once (`SCRUB` in
+`pack.py`, same contract as `EDITS`), so this is reproducible from `bot/*.cs`
+rather than hand-edited. `pack.py` then re-scans the merged body against
+`SCRUB_FORBIDDEN` — regexes for `docs/*.md`, `\bv1|v2\b`, `2025`, competitor bot
+names, `champion`, host names — and **fails the pack** if a newly written comment
+in `bot/` reintroduces any of them. It also refuses to emit a file still
+containing `RIPTIDE_WEIGHTS`, `RIPTIDE_DIAG`, `GetEnvironmentVariable`,
+`File.ReadAllText`, `DllImport`, `stackalloc` or `unsafe`.
 
 ---
 
@@ -139,42 +159,58 @@ confirm the compiled-in build reproduces the tuned result.
 
 ## Renaming the agent
 
-The final competition name is still TBD. The class name is what `GameRunner`
-matches on (`Program.cs` reflects over the `Bots` assembly and selects by type
-name), so renaming the agent means renaming the type.
+**Done — the competition name is `PrimalKyogre` ("Primal Kyogre"), applied by
+`pack.py`.** `bot/*.cs` still uses the development name; nothing in the dev tree
+had to change.
 
-```bash
-sed -i '' 's/\bRiptide\b/NewName/g' submission/RiptideSubmission.cs
-mv submission/RiptideSubmission.cs submission/NewName.cs
+The class name is what `GameRunner` matches on (`Program.cs` reflects over the
+`Bots` assembly and selects by type name), so renaming the agent means renaming
+the type. `pack.py` does it as the last step, on the merged body only (the
+header is already written in the competition name):
+
+```python
+AGENT_CLASS      = "PrimalKyogre"    # class, namespace, output filename
+AGENT_DISPLAY    = "Primal Kyogre"   # header prose
+AGENT_STDERR_TAG = "primal-kyogre"   # lowercase log prefix
+RENAMES = [("Riptide", AGENT_CLASS), ("riptide", AGENT_STDERR_TAG)]
 ```
 
-That one substitution covers the class, its constructor, the namespace and the
-prose comments together — they all use the same capitalized token.
+The capitalized substitution covers the class, its constructor, the namespace,
+the `// from …` module banners and the prose comments together. **The trap is
+the lowercase token**: a capitalized-only rename leaves `[riptide]` on the two
+stderr lines. `pack.py` handles it with the second rule and guards it three
+ways:
 
-Two things it does **not** catch, both cosmetic:
+- before renaming, the merged body must contain **exactly two** lowercase
+  `riptide` occurrences (`EXPECTED_LOWER_TAGS`) — the two stderr prefixes and
+  nothing else, so a new log line or a surviving doc citation trips the check;
+- after renaming, `re.search(r"[Rr]iptide", out, re.IGNORECASE)` must find
+  nothing at all;
+- after renaming, the output must contain exactly one `public class
+  PrimalKyogre : AI`, one `namespace PrimalKyogre;` and two `[primal-kyogre]`
+  prefixes.
 
-- the lowercase `[riptide]` prefix on the fatal-outcome stderr line, and
-- the lowercase `riptide` in the `docs/riptide-v2.md` citations in comments.
-
-Fix those with a second `s/riptide/newname/g` if we care. Also update `NAMESPACE`
-and `ORDER`/`HEADER` in `pack.py`, or the rename will be undone the next time the
-file is regenerated.
-
-Renaming the file itself is free — nothing references the filename.
+To rename again, change the three constants at the top of `pack.py` and re-run
+it. Nothing else needs touching, and nothing references the output filename.
 
 ---
 
 ## Verifying a candidate submission
 
 The merged file is validated by dropping it into the Bots project as the *only*
-Riptide source and building:
+source from this project and building:
 
 ```bash
 # from the repo root
 mv ScriptsOfTribute-Core/Bots/src/Riptide /tmp/riptide_src_backup
-cp submission/RiptideSubmission.cs ScriptsOfTribute-Core/Bots/src/
+cp submission/PrimalKyogre.cs ScriptsOfTribute-Core/Bots/src/
 cd ScriptsOfTribute-Core && dotnet build TalesOfTribute.sln -c Release
 ```
+
+Hash the tree first (`ScriptsOfTribute-Core/Bots/src/**` plus the three staged
+`Bots.dll` copies) and again after restoring, so "restored" is proved rather
+than assumed. Back the DLLs up by copy — restoring them by rebuild is a weaker
+claim.
 
 A clean build **is** the toolchain check. `Bots.csproj` pins
 `LangVersion=10` and `TargetFramework=netstandard2.1`, and the compiler
@@ -190,7 +226,7 @@ Then stage the DLL and play a couple of games:
 cp ScriptsOfTribute-Core/Bots/bin/Release/netstandard2.1/Bots.dll \
    ScriptsOfTribute-Core/GameRunner/bin/Release/net8.0/Bots/Bots.dll
 cd ScriptsOfTribute-Core/GameRunner/bin/Release/net8.0
-DOTNET_ROLL_FORWARD=LatestMajor dotnet GameRunner.dll Riptide BestMCTS3 -n 1 -s 42 -to 10
+DOTNET_ROLL_FORWARD=LatestMajor dotnet GameRunner.dll PrimalKyogre BestMCTS3 -n 1 -s 42 -to 10
 ```
 
 Look for `Ends due to other factors: 0/1` and no stderr output.
@@ -198,8 +234,9 @@ Look for `Ends due to other factors: 0/1` and no stderr output.
 **Restore the tree afterwards:**
 
 ```bash
-rm ScriptsOfTribute-Core/Bots/src/RiptideSubmission.cs
+rm ScriptsOfTribute-Core/Bots/src/PrimalKyogre.cs
 mv /tmp/riptide_src_backup ScriptsOfTribute-Core/Bots/src/Riptide
+# restore the three staged Bots.dll copies from the byte backups, or:
 scripts/sync_bot.sh          # rebuilds and re-stages the normal dev DLLs
 ```
 
@@ -210,14 +247,30 @@ forget.
 
 ## Pre-send checklist
 
-- [ ] `python3 submission/pack.py --check` passes
-- [ ] merged file builds clean in the Bots project as the only Riptide source
-- [ ] zero warnings attributable to the merged file
-- [ ] a game vs `BestMCTS3` ends with `other factors: 0` and silent stderr
-- [ ] file size well under 25 MB (it is ~91 KB)
-- [ ] **any promoted tuned weights are baked into `bot/*.cs` literals, and the
-      final benchmark was run with `RIPTIDE_WEIGHTS` unset** (see the trap above)
-- [ ] agent renamed, `DESCRIPTION.md` placeholders filled in
-- [ ] `DESCRIPTION.md` TODO slots (tuned weights, benchmark numbers) resolved
-- [ ] decided whether to soften the competitor-analysis comments and drop the
-      internal `docs/riptide-v*.md` citations from the shipped comments
+Status as of the final packaging pass (2026-08-07):
+
+- [x] `python3 submission/pack.py --check` passes
+- [x] merged file builds clean in the Bots project as the only source from this
+      project — 0 errors, and **0 warnings** attributable to `PrimalKyogre.cs`
+      (the 143 warnings in the log are all pre-existing, in the engine's own
+      sample bots and the 2025 archive)
+- [x] games vs `BestMCTS3` end with `other factors: 0` and silent stderr —
+      3/3 seeds 77–79, all won on the 40-prestige condition
+- [x] file size well under 25 MB (~91 KB)
+- [x] no tuned weights promoted; `bot/` is byte-identical to git HEAD, so the
+      compiled-in defaults **are** the benchmarked configuration (see the trap
+      above — this is the condition that makes it true, not an assumption)
+- [x] agent renamed to `PrimalKyogre` by `pack.py`, including the lowercase
+      `[primal-kyogre]` stderr prefixes
+- [x] comment scrub applied via `SCRUB` and enforced by `SCRUB_FORBIDDEN`
+- [x] `DESCRIPTION.md` TODO slots resolved (benchmark numbers, methodology,
+      shipped configuration, the "substantially different" section, AI
+      disclosure)
+- [x] `submission/final/` assembled
+
+Open item for the author:
+
+- [ ] **read Section 9 (AI tool disclosure) of `DESCRIPTION.md` and confirm it
+      matches both the competition's stated disclosure requirement and what
+      actually happened.** It is the one section that cannot be verified from
+      the repository.
