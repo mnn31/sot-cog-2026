@@ -18,3 +18,16 @@ All runs: seeded mirror pairs (same seed, seats swapped), `-to 10` (competition 
 ## Open questions
 
 - Seat asymmetry: Squirtle wins ~65% as P1 but ~38% as P2 in both baseline runs (n=24 each; pattern consistent). Check second-seat compensation handling in eval (tempo/break-even prestige term) and whether the field shows the same P1 skew on these seeds.
+
+## Submission gauntlet (2026-08-03, snapshot v2 = submission candidate, Mac, validity-gated)
+
+| Opponent | 2025 rank | Clean result | Notes |
+|---|---|---|---|
+| SakkirinaSolo | 1st (71.8%) | **68.8%** (11/16) | clean batch, 0 flags |
+| Sakkirina | 2nd (70.6%) | ~58–62% clean-only | opponent dies to timeout/crash in up to 50% of games on this host (all abnormal ends were its losses; forensics seeds 9200-9209); env-specific fragility, clean-games number reported |
+| HQL_Plus_BOT | 3rd (69.2%) | 68.8% (11/16) | clean |
+| BestMCTS3 | 4th (66.1%) | 50.0% (8/16) | clean |
+| EBot_C | 5th (56.0%) | 81.2% (13/16) | clean |
+| EBot_F | 6th (51.8%) | 68.8% (11/16) | clean |
+
+Field win rate: **66.7%** on both independent 96-game halves (128/192 total, CI 59.7–72.9). 2025 champion's field number: 71.8% (vs a field diluted by weak Python entrants not present here).
