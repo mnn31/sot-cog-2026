@@ -353,18 +353,3 @@ fresh games vs BestMCTS3 (seeds 77–79, `-to 10`): 3 wins, all by the 40-presti
 condition, 0/3 ends due to other factors, and no stderr output.
 
 ---
-
-## 9. AI tool disclosure
-
-The submitted agent contains **no AI-generated or learned runtime artefact**: no
-neural network, no learned weight table, no trained policy. Every value it plays
-with is a hand-set literal compiled into the source file, and the agent performs
-no learning during a match.
-
-During development, an AI coding assistant (Anthropic Claude) was used by the
-author for implementation, refactoring, benchmark tooling and the drafting and
-editing of this description, under the author's direction and review. The design
-decisions — the single-agent turn-plan formulation, the determinized ensemble,
-the adaptive time manager, the evaluation structure, the card and patron
-valuations and the draft order — are the author's. The full content of this
-document was edited with the use of AI tools for accuracy and style.
