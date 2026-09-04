@@ -31,3 +31,35 @@ All runs: seeded mirror pairs (same seed, seats swapped), `-to 10` (competition 
 | EBot_F | 6th (51.8%) | 68.8% (11/16) | clean |
 
 Field win rate: **66.7%** on both independent 96-game halves (128/192 total, CI 59.7–72.9). 2025 champion's field number: 71.8% (vs a field diluted by weak Python entrants not present here).
+
+## OFFICIAL RESULT — IEEE CoG 2026 (announced 2026-09-04)
+
+**Primal Kyogre placed 2nd** (prize podium) — 3rd in the raw table, behind two entries
+by the same author (one prize per participant).
+
+| # | Agent | Winrate | Games | W | L |
+|---|---|---|---|---|---|
+| 1 | DeepSetsBlendBot (Doruk Karaman) | 69.21% | 5460 | 3779 | 1681 |
+| 2 | DeepSetsBot (Doruk Karaman) | 68.24% | 5460 | 3726 | 1734 |
+| **3** | **Primal Kyogre (Manan Gupta)** | **55.16%** | **5460** | **3012** | **2448** |
+| 4 | SakkirinaSolo (2025 champion, benchmark) | 48.97% | 5460 | 2674 | 2786 |
+| 5 | NAgent_4 (Niklas Angert) | 46.25% | 5460 | 2525 | 2935 |
+| 6 | BestMCTS3 (2025, benchmark) | 44.51% | 5460 | 2430 | 3030 |
+| 7 | HQL_Plus_BOT (2025, benchmark) | 44.30% | 5460 | 2419 | 3041 |
+| 8 | PatronZeroBot (Martin Niederl) | 23.35% | 5460 | 1275 | 4185 |
+
+Prize podium: 1st DeepSetsBlendBot, **2nd Primal Kyogre**, 3rd NAgent_4.
+
+Official conditions: 8 games per pair per round, 5,460 games per agent, average winrate;
+Ubuntu 25.04, .NET 8.0, 8 CPUs, 32 GB RAM.
+
+### Prediction vs. reality
+
+- **Goal achieved:** we finished above all three 2025 podium agents — SakkirinaSolo (4th),
+  BestMCTS3 (6th), HQL_Plus_BOT (7th). Our pre-submission gauntlet predicted exactly this.
+- **Field winrate came in lower than predicted** (55.16% actual vs 66.7% local): our local
+  field was the 2025 agents only. The two 2026 entries above us were new — a learned
+  evaluation network grafted onto SakkirinaSolo's search, i.e. precisely the "train the
+  evaluation" step identified in riptide-v1 §3 as the highest-value next move, which we
+  never reached (pod loss ended the tuning campaign).
+- Zero abnormal endings attributable to our agent across 5,460 official games.
